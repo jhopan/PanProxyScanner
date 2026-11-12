@@ -34,9 +34,8 @@ echo.
 
 rem ---------------------------------------------------------------- deteksi ----
 set "ARCH=%PROCESSOR_ARCHITECTURE%"
-if /I "%ARCH%"=="AMD64" set "ARCH_NAME=amd64"
-if /I "%ARCH%"=="x86"   set "ARCH_NAME=amd64"
-if /I "%ARCH%"=="ARM64" set "ARCH_NAME=amd64 (emulasi di ARM64)"
+set "ARCH_NAME=amd64"
+if /I "%ARCH%"=="ARM64" set "ARCH_NAME=amd64 lewat emulasi"
 echo   arsitektur : %ARCH%  [%ARCH_NAME%]
 echo   tujuan     : %INSTALL_DIR%
 echo.
@@ -50,6 +49,16 @@ echo %PORT%| findstr /R "^[1-9][0-9]*$" >nul
 if errorlevel 1 (
   echo   PERINGATAN: port "%PORT%" tidak valid, memakai 8787.
   set "PORT=8787"
+)
+netstat -ano | findstr /R /C:":%PORT% .*LISTENING" >nul 2>&1
+if not errorlevel 1 (
+  echo   PERINGATAN: port %PORT% sedang dipakai proses lain.
+  if /I "%NONINTERACTIVE%"=="1" (
+    echo   (mode non-interaktif: tetap dilanjutkan, tapi scanner kemungkinan gagal bind)
+  ) else (
+    set /p "PORT=Masukkan port lain [8790]: "
+    if "!PORT!"=="" set "PORT=8790"
+  )
 )
 
 if not defined SERVICE (
@@ -76,7 +85,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 if errorlevel 1 (
   echo   nama stabil belum tersedia di rilis terbaru, mencari lewat GitHub API...
   for /f "usebackq delims=" %%U in (`powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-      "$r = Invoke-RestMethod -Uri '%API_URL%' -Headers @{ 'User-Agent'='panproxyscanner-installer' } -UseBasicParsing; ($r.assets | Where-Object { $_.name -like 'panproxyscanner-*windows-amd64.zip' } | Select-Object -First 1).browser_download_url"`) do set "URL=%%U"
+      "$r = Invoke-RestMethod -Uri '%API_URL%' -Headers @{ 'User-Agent'='panproxyscanner-installer' } -UseBasicParsing; $a = $r.assets | Where-Object { $_.name -like 'panproxyscanner-*windows-amd64.zip' } | Select-Object -First 1; if ($a) { $a.browser_download_url }"`) do set "URL=%%U"
   if "!URL!"=="" (
     echo   GAGAL: tidak menemukan aset rilis. Cek https://github.com/%REPO%/releases
     goto :gagal
@@ -96,8 +105,7 @@ echo   memasang ke %INSTALL_DIR%
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "try { Expand-Archive -Path '%TMPZIP%' -DestinationPath '%INSTALL_DIR%' -Force -ErrorAction Stop } catch { exit 4 }"
 if errorlevel 1 (
-  echo   GAGAL: gagal mengekstrak arsip (kadang karena masih ada proses yang memakai biner lama).
-  echo   Tutup proses panproxyscanner.exe lalu jalankan installer lagi.
+  echo   GAGAL: gagal mengekstrak arsip. Tutup dulu proses panproxyscanner.exe, lalu jalankan installer lagi.
   goto :gagal
 )
 del "%TMPZIP%" >nul 2>&1
@@ -131,9 +139,8 @@ rem ---------------------------------------------------------------- jalankan --
 if /I "%RUN_NOW%"=="yes" (
   start "" /min /D "%INSTALL_DIR%" "%EXE%" serve -addr 0.0.0.0:%PORT%
   echo   menjalankan scanner di port %PORT% ...
-  timeout /t 4 /nobreak >nul
   powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "try { $r = Invoke-WebRequest -Uri 'http://127.0.0.1:%PORT%/api/health' -UseBasicParsing -TimeoutSec 5; Write-Host ('  health: ' + $r.StatusCode + ' ' + $r.Content) } catch { Write-Host '  PERINGATAN: health check gagal, cek firewall/antivirus' }"
+    "$ok=$false; for ($i=0; $i -lt 10; $i++) { Start-Sleep -Seconds 2; try { $r = Invoke-WebRequest -Uri 'http://127.0.0.1:%PORT%/api/health' -UseBasicParsing -TimeoutSec 5; Write-Host -NoNewline '  health: '; Write-Host $r.StatusCode; $ok=$true; break } catch {} }; if (-not $ok) { Write-Host '  PERINGATAN: health check gagal setelah 20 detik - cek firewall/antivirus' }"
 )
 
 echo.

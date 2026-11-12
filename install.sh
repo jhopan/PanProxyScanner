@@ -50,9 +50,23 @@ ask_port() {
     case "$_p" in
       ''|*[!0-9]*) warn "port harus angka"; continue ;;
     esac
-    if [ "$_p" -ge 1 ] && [ "$_p" -le 65535 ]; then printf '%s\n' "$_p"; return 0; fi
-    warn "port harus 1-65535"
+    if [ "$_p" -lt 1 ] || [ "$_p" -gt 65535 ]; then warn "port harus 1-65535"; continue; fi
+    if port_in_use "$_p"; then
+      warn "port $_p sudah dipakai proses lain — pilih port lain"
+      [ "$NONINTERACTIVE" = "1" ] && printf '%s\n' "$_p" && return 0
+      continue
+    fi
+    printf '%s\n' "$_p"; return 0
   done
+}
+
+# port_in_use: benar kalau ada yang menjawab di 127.0.0.1:<port>.
+port_in_use() {
+  if have curl; then
+    curl -sS -m 2 -o /dev/null "http://127.0.0.1:$1/" >/dev/null 2>&1 && return 0
+    return 1
+  fi
+  return 1
 }
 
 detect_os() {
@@ -139,6 +153,9 @@ say ""
 # ---------------------------------------------------------------- tanya jawab --------
 DEFAULT_PORT="8787"
 if [ -z "$PORT" ]; then PORT="$(ask_port "$DEFAULT_PORT")"; else info "port (dari lingkungan): $PORT"; fi
+if port_in_use "$PORT"; then
+  warn "port $PORT sepertinya sudah dipakai proses lain — scanner bisa gagal bind"
+fi
 
 DEFAULT_SERVICE="no"
 [ "$OS" = "linux" ] && have systemctl && DEFAULT_SERVICE="yes"
@@ -287,11 +304,19 @@ if [ "$RUN_NOW" = "yes" ]; then
     else
       ( cd "$INSTALL_DIR" && nohup "$BIN" serve -addr "0.0.0.0:$PORT" >"$INSTALL_DIR/${SERVICE_NAME}.out.log" 2>&1 & )
     fi
-    sleep 3
-    if have curl && curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+    # beri waktu: proses baru perlu membuat database + pengaturan, dan antivirus bisa
+    # memperlambat start pertama (sampai ~20 detik pada Windows).
+    _i=0
+    _ok="no"
+    while [ "$_i" -lt 15 ]; do
+      sleep 1
+      if have curl && curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then _ok="yes"; break; fi
+      _i=$((_i + 1))
+    done
+    if [ "$_ok" = "yes" ]; then
       info "scanner berjalan (log: $INSTALL_DIR/${SERVICE_NAME}.out.log)"
     else
-      warn "health check gagal — cek log $INSTALL_DIR/${SERVICE_NAME}.out.log"
+      warn "health check gagal setelah 15 detik — cek log $INSTALL_DIR/${SERVICE_NAME}.out.log"
     fi
   fi
 fi
