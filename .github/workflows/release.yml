@@ -1,0 +1,132 @@
+name: Release
+
+# Rilis dibuat dengan mendorong tag, mis.:
+#   git tag v0.1.0 && git push origin v0.1.0
+# Hasilnya:
+#   * rilis tag "v0.1.0"   → biner Windows/Linux + APK Android
+#   * tag "latest" dipindah ke versi itu dan rilis "latest" diperbarui dengan aset yang sama,
+#     sehingga .../releases/latest selalu menunjuk versi terbaru.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then echo "berkas belum diformat:"; echo "$out"; exit 1; fi
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./... -count=1
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64, ext: ".exe", tag: windows-amd64 }
+          - { goos: linux, goarch: amd64, ext: "", tag: linux-amd64 }
+          - { goos: linux, goarch: arm64, ext: "", tag: linux-arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build ${{ matrix.tag }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/pan-proxy-scanner${{ matrix.ext }}" .
+          cp README.md dist/README.md
+          cp AGENTS.md dist/AGENTS.md
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            (cd dist && zip -r "../pan-proxy-scanner-${VERSION}-${{ matrix.tag }}.zip" .)
+          else
+            (cd dist && tar czf "../pan-proxy-scanner-${VERSION}-${{ matrix.tag }}.tar.gz" .)
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.tag }}
+          path: |
+            pan-proxy-scanner-*.zip
+            pan-proxy-scanner-*.tar.gz
+          if-no-files-found: error
+
+  apk:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Build APK (varian debug = sudah ditandatangani, bisa langsung dipasang)
+        working-directory: android
+        run: gradle --no-daemon assembleDebug
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk pan-proxy-scanner.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: pan-proxy-scanner.apk
+          if-no-files-found: error
+
+  release:
+    needs: [build, apk]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Daftar aset
+        run: ls -lh artifacts
+      - name: Buat rilis versi
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: artifacts/*
+      - name: Perbarui tag + rilis "latest"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git tag -f latest "${GITHUB_SHA}" >/dev/null
+          git push -f origin latest
+          if ! gh release view latest >/dev/null 2>&1; then
+            gh release create latest --title "latest" --notes "Rilis terbaru (diperbarui otomatis)." || true
+          fi
+          gh release upload latest artifacts/* --clobber
+          gh release edit latest \
+            --title "latest — ${VERSION}" \
+            --notes "Versi terbaru: **${VERSION}**. Aset di sini identik dengan rilis [${VERSION}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${VERSION}). Tautan stabil: https://github.com/${GITHUB_REPOSITORY}/releases/latest"

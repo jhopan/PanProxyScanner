@@ -1,0 +1,699 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pan Proxy Scanner — panel</title>
+<style>
+  :root {
+    --bg:#07111f; --panel:#0d1a2b; --panel2:#101f33; --border:#1e3350; --fg:#e8eef7;
+    --muted:#8ba3c0; --accent:#37c8ff; --ok:#3ddc97; --warn:#ffc857; --err:#ff6b6b;
+    --side:220px;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 system-ui, "Segoe UI", Roboto, sans-serif; }
+  .layout { display:grid; grid-template-columns:var(--side) 1fr; min-height:100vh; }
+  aside { background:linear-gradient(180deg,#0a1524,#081120); border-right:1px solid var(--border); padding:16px 12px; display:flex; flex-direction:column; gap:6px; position:sticky; top:0; height:100vh; }
+  .brand { display:flex; align-items:center; gap:10px; padding:4px 8px 14px; }
+  .logo { width:32px; height:32px; border-radius:9px; background:linear-gradient(135deg,#1580bb,#37c8ff); display:grid; place-items:center; font-weight:700; color:#04121f; }
+  .brand b { font-size:15px; letter-spacing:.2px; }
+  .brand b span { color:var(--accent); }
+  nav { display:flex; flex-direction:column; gap:2px; }
+  .nav-item { display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius:9px; color:var(--muted); cursor:pointer; border:1px solid transparent; }
+  .nav-item:hover { background:var(--panel); color:var(--fg); }
+  .nav-item.active { background:var(--panel2); color:var(--fg); border-color:var(--border); }
+  .nav-item .ic { width:18px; text-align:center; opacity:.85; }
+  .side-foot { margin-top:auto; border-top:1px solid var(--border); padding-top:12px; font-size:12px; color:var(--muted); }
+  .side-foot .who { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; }
+  .side-foot button { width:100%; }
+  main { min-width:0; }
+  header.top { display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:space-between; padding:16px 22px; border-bottom:1px solid var(--border); position:sticky; top:0; background:rgba(7,17,31,.92); backdrop-filter:blur(6px); z-index:5; }
+  header.top h1 { font-size:17px; margin:0; }
+  header.top .sub { color:var(--muted); font-size:12px; margin-top:2px; }
+  .content { padding:20px 22px 60px; max-width:1400px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px,1fr)); gap:12px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px 16px; }
+  .card .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.6px; }
+  .card .value { font-size:24px; font-weight:600; margin-top:4px; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:16px; margin:16px 0; }
+  .panel h2 { font-size:15px; margin:0 0 12px; }
+  .row { display:flex; flex-wrap:wrap; gap:10px; align-items:end; }
+  label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
+  input, select, button { background:var(--panel2); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font:inherit; }
+  input[type=number] { width:95px; }
+  button { cursor:pointer; }
+  button.primary { background:linear-gradient(180deg,#1580bb,#0d5f8c); border-color:#1e8fcb; }
+  button.danger { background:linear-gradient(180deg,#a33,#7d2626); border-color:#b44; }
+  button.ghost:hover, button.primary:hover, button.danger:hover { filter:brightness(1.15); }
+  table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--border); border-radius:12px; overflow:hidden; }
+  th, td { padding:9px 12px; text-align:left; border-bottom:1px solid var(--border); font-variant-numeric:tabular-nums; }
+  th { background:var(--panel2); color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.5px; }
+  tr:last-child td { border-bottom:0; }
+  .pill { padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid var(--border); }
+  .pill.ok { color:var(--ok); border-color:#1d5a44; }
+  .pill.dead { color:var(--err); border-color:#5c2a2a; }
+  .pill.socks5 { color:var(--accent); border-color:#1c4f66; }
+  .pill.http { color:var(--warn); border-color:#5b4a20; }
+  .muted { color:var(--muted); }
+  .bar { height:6px; background:var(--panel2); border-radius:999px; overflow:hidden; margin-top:8px; }
+  .bar > i { display:block; height:100%; width:0; background:var(--accent); transition:width .4s; }
+  code, pre { background:var(--panel2); border-radius:8px; font-size:12.5px; }
+  code { padding:2px 6px; }
+  pre { padding:12px 14px; overflow:auto; border:1px solid var(--border); }
+  .api { display:grid; gap:6px; font-size:13px; }
+  .toast { position:fixed; right:20px; bottom:20px; background:var(--panel2); border:1px solid var(--accent); padding:10px 14px; border-radius:10px; opacity:0; transition:opacity .3s; z-index:20; }
+  .toast.show { opacity:1; }
+  .view { display:none; }
+  .view.active { display:block; }
+  .flag { font-size:12px; color:var(--muted); }
+  @media (max-width:820px) { .layout { grid-template-columns:1fr; } aside { position:static; height:auto; } nav { flex-direction:row; overflow:auto; } .side-foot { margin-top:12px; } }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside>
+    <div class="brand"><div class="logo">PS</div><b>Proxy <span>Scraping</span></b></div>
+    <nav id="nav">
+      <div class="nav-item active" data-view="dashboard"><span class="ic">▣</span> Dashboard</div>
+      <div class="nav-item" data-view="proxies"><span class="ic">≡</span> Daftar proxy</div>
+      <div class="nav-item" data-view="sources"><span class="ic">⇩</span> Sumber</div>
+      <div class="nav-item" data-view="scheduler"><span class="ic">⏱</span> Scheduler</div>
+      <div class="nav-item" data-view="tunnel"><span class="ic">☁</span> Tunnel CF</div>
+      <div class="nav-item" data-view="supabase"><span class="ic">⇅</span> Supabase</div>
+      <div class="nav-item" data-view="pipeline"><span class="ic">⟳</span> Pipeline</div>
+      <div class="nav-item" data-view="docs"><span class="ic">?</span> Dokumentasi API</div>
+    </nav>
+    <div class="side-foot">
+      <div class="who"><span id="whoami">—</span> <span class="pill" id="autoPill">auto —</span></div>
+      <button class="ghost" id="btnLogout">Keluar</button>
+    </div>
+  </aside>
+
+  <main>
+    <header class="top">
+      <div>
+        <h1 id="viewTitle">Dashboard</h1>
+        <div class="sub" id="viewSub">ringkasan hasil scraping</div>
+      </div>
+      <div class="row">
+        <button class="primary" id="btnNow">Jalankan sekarang</button>
+        <button class="ghost" id="btnReload">Muat ulang</button>
+      </div>
+    </header>
+
+    <div class="content">
+      <!-- DASHBOARD -->
+      <section class="view active" id="view-dashboard">
+        <div class="cards" id="cards"></div>
+        <div class="panel">
+          <div><b id="phase">siap</b> <span class="muted" id="progressText">—</span></div>
+          <div class="bar"><i id="progressBar"></i></div>
+        </div>
+        <div class="panel">
+          <h2>Proxy tercepat</h2>
+          <div id="topTable" class="muted">memuat…</div>
+        </div>
+      </section>
+
+      <!-- PROXIES -->
+      <section class="view" id="view-proxies">
+        <div class="panel">
+          <h2>Filter</h2>
+          <div class="row">
+            <label>Status<select id="fAlive"><option value="true">hidup</option><option value="false">mati</option><option value="">semua</option></select></label>
+            <label>Protokol<select id="fProtocol"><option value="">semua</option><option value="socks5">socks5</option><option value="http">http</option></select></label>
+            <label>Negara<select id="fCountry"><option value="">semua</option></select></label>
+            <label>Max ping<input type="number" id="fMaxPing" value="8000" min="0" step="500" title="latensi satu permintaan lewat proxy; proxy publik gratis wajar 3-15 detik"></label>
+            <label>Min sumber<input type="number" id="fMinSources" value="1" min="0"></label>
+            <label>Segar (menit)<input type="number" id="fFresh" value="360" min="0" step="30"></label>
+            <label>Limit<input type="number" id="fLimit" value="200" min="1" max="5000"></label>
+            <label>Urut<select id="fOrder"><option value="score">skor (default)</option><option value="ping">ping</option><option value="last_checked">terbaru</option><option value="sources">sumber</option></select></label>
+            <label>TLS 443<select id="fTls"><option value="">semua</option><option value="true">harus bisa TLS</option></select></label>
+            <label>Port 8443/2053<select id="fAlt"><option value="">semua</option><option value="true">harus bisa</option></select></label>
+            <button class="primary" id="btnFilter">Terapkan</button>
+            <button class="ghost" id="btnCopy">Copy ip:port</button>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Export VLESS</h2>
+          <div class="row">
+            <label>Host worker<input id="cHost" placeholder="worker.workers.dev" size="28"></label>
+            <label>UUID<input id="cUuid" placeholder="uuid" size="34"></label>
+            <button class="ghost" id="btnClash">Clash YAML</button>
+            <button class="ghost" id="btnRaw">URI vless://</button>
+          </div>
+        </div>
+        <table>
+          <thead><tr><th>#</th><th>Proxy</th><th>Negara</th><th>Status</th><th>Protokol</th><th>TLS 443</th><th>Port lain</th><th>Exit IP</th><th>Ping</th><th>OK/Gagal</th><th>Sumber</th><th>Cek terakhir</th></tr></thead>
+          <tbody id="rows"><tr><td colspan="12" class="muted">memuat...</td></tr></tbody>
+        </table>
+      </section>
+
+      <!-- SOURCES -->
+      <section class="view" id="view-sources">
+        <div class="panel">
+          <h2>Tambah sumber</h2>
+          <div class="row">
+            <label>URL daftar proxy<input id="srcUrl" placeholder="https://contoh.com/proxies.txt" size="42"></label>
+            <label>Nama (opsional)<input id="srcName" placeholder="otomatis dari URL" size="20"></label>
+            <label>Jenis<select id="srcKind"><option value="txt">txt</option><option value="json">json</option><option value="api">api</option><option value="html">html</option></select></label>
+            <label>Opsional<select id="srcOptional"><option value="false">tidak</option><option value="true">ya</option></select></label>
+            <button class="primary" id="btnAddSource">Tambah sumber</button>
+          </div>
+          <div class="muted" style="margin-top:8px">Parser-nya generik: apa pun yang berisi pola <code>ip:port</code> (teks, JSON, tabel HTML) akan terbaca.</div>
+        </div>
+        <div class="panel">
+          <h2>Katalog sumber <span class="muted" id="srcCount"></span></h2>
+          <div id="sources" class="muted">memuat…</div>
+        </div>
+      </section>
+
+      <!-- SCHEDULER -->
+      <section class="view" id="view-scheduler">
+        <div class="panel">
+          <h2>Siklus otomatis</h2>
+          <div class="row">
+            <label>Otomatis<select id="sAuto"><option value="false">nonaktif</option><option value="true">aktif</option></select></label>
+            <label>Interval (menit)<input type="number" id="sInterval" min="1" max="1440"></label>
+            <label>Kandidat / siklus<input type="number" id="sCap" min="50" max="500000" step="500"></label>
+            <label>Verifikasi paralel<input type="number" id="sJobs" min="1" max="2000"></label>
+            <label>Min sumber<input type="number" id="sMinSources" min="0" max="20"></label>
+            <label>Refresh baris<input type="number" id="sRefreshLimit" min="0" max="50000" step="50"></label>
+            <label>Umur refresh (menit)<input type="number" id="sRefreshAfter" min="1" max="1440"></label>
+            <label>Segar (menit)<input type="number" id="sFresh" min="1" max="10080"></label>
+            <label>Purge mati (jam)<input type="number" id="sPurge" min="0" max="720"></label>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <button class="primary" id="btnSave">Simpan</button>
+            <button class="ghost" id="btnAutoStart">Mulai otomatis</button>
+            <button class="ghost" id="btnAutoStop">Stop otomatis</button>
+            <button class="ghost" id="btnStopCycle">Stop siklus</button>
+            <button class="danger" id="btnPurge">Purge catatan mati</button>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Akun &amp; API</h2>
+          <div class="row">
+            <label>Username admin<input id="sAdminUser" size="16"></label>
+            <label>Sandi baru (kosongkan bila tidak diganti)<input id="sAdminPass" type="password" size="20" placeholder="••••••"></label>
+            <label>Token API (klien mesin)<input id="sToken" placeholder="kosong = tanpa token" size="20"></label>
+            <label>Public URL (hasil tunnel)<input id="sPublicUrl" placeholder="https://scraping.domain.com" size="28"></label>
+            <label>Nama tunnel CF<input id="sTunnelName" placeholder="pan-proxy-scanner" size="18"></label>
+            <label>Domain tunnel CF<input id="sTunnelDomain" placeholder="scraping.domainmu.com" size="26"></label>
+            <button class="primary" id="btnSaveAccount">Simpan akun &amp; API</button>
+          </div>
+          <div class="muted" id="runtime" style="margin-top:10px">—</div>
+        </div>
+      </section>
+
+      <!-- SUPABASE -->
+      <section class="view" id="view-supabase">
+        <div class="panel">
+          <h2>Koneksi Supabase (tabel proxy_pool)</h2>
+          <div class="row">
+            <label>URL project<input id="sbUrl" placeholder="https://xxxx.supabase.co" size="38"></label>
+            <label>Key (anon/service)<input id="sbKey" type="password" placeholder="kosongkan bila tidak diganti" size="34"></label>
+            <label>Tabel<input id="sbTable" placeholder="proxy_pool" size="14"></label>
+            <button class="primary" id="btnSbSave">Simpan</button>
+            <button class="ghost" id="btnSbTest">Tes koneksi</button>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <label>Otomatis dorong hasil siklus<select id="sbAuto"><option value="false">tidak</option><option value="true">ya</option></select></label>
+            <label>Tarik &amp; verifikasi per siklus<input type="number" id="sbPull" min="0" max="20000" step="10" style="width:120px"></label>
+            <label>Jumlah baris (aksi manual)<input type="number" id="sbLimit" min="1" max="2000" value="50" style="width:120px"></label>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <label>Hapus baris mati di Supabase (> N hari)<input type="number" id="sbPruneDays" min="0" max="3650" style="width:110px"></label>
+            <button class="primary" id="btnSbPush">Push sekarang</button>
+            <button class="primary" id="btnSbPull">Tarik &amp; verifikasi</button>
+            <button class="danger" id="btnSbPrune">Prune baris mati</button>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <label>Uji TLS 443 saat verifikasi<select id="sbTls"><option value="true">ya</option><option value="false">tidak</option></select></label>
+            <label>Uji port 8443/2053<select id="sbAlt"><option value="true">ya</option><option value="false">tidak</option></select></label>
+            <label>Push hanya proxy sanggup TLS<select id="sbPushTls"><option value="true">ya</option><option value="false">tidak</option></select></label>
+            <label>Matikan sumber yang kosong berulang<select id="sbAutoDisable"><option value="true">ya</option><option value="false">tidak</option></select></label>
+            <label>Batas kosong berturut-turut<input type="number" id="sbStreak" min="0" max="100" style="width:110px"></label>
+          </div>
+          <div class="muted" id="sbStatus" style="margin-top:12px">—</div>
+        </div>
+        <div class="panel">
+          <h2>Alur yang disarankan</h2>
+          <ol class="muted" style="margin:0;padding-left:18px">
+            <li>Aplikasi ini yang melakukan verifikasi (handshake nyata) — panel CFVPN Hub cukup membaca tabel.</li>
+            <li><b>Push sekarang</b>: proxy hidup &amp; segar dari database lokal dikirim ke tabel Supabase (upsert by <code>ip,port</code>, kolom <code>is_active</code>, <code>ping</code>, <code>last_checked</code>, <code>country</code>).</li>
+            <li><b>Tarik &amp; verifikasi</b>: baris lama dari Supabase diambil, diuji satu per satu di sini, lalu ditulis balik — jadi daftar di Supabase tidak berisi proxy mati.</li>
+            <li>Nyalakan <b>otomatis dorong</b> + isi <b>tarik &amp; verifikasi per siklus</b> supaya panel selalu menerima daftar segar tanpa menambah bandwidth browser.</li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- TUNNEL -->
+      <section class="view" id="view-tunnel">
+        <div class="panel">
+          <h2>Cloudflare Tunnel</h2>
+          <div id="tunnelInfo" class="muted">memuat…</div>
+        </div>
+      </section>
+
+      <!-- PIPELINE -->
+      <section class="view" id="view-pipeline">
+        <div class="panel">
+          <h2>Jadwal harian</h2>
+          <div class="row">
+            <label>Mode jadwal<select id="plMode"><option value="daily">harian (jam tetap)</option><option value="interval">interval menit</option></select></label>
+            <label>Jam harian (HH:MM)<input id="plDailyAt" placeholder="05:30" size="8"></label>
+            <label>Interval menit (mode interval)<input type="number" id="plInterval" min="1" max="1440"></label>
+            <label>Penjadwal aktif<select id="plAuto"><option value="false">nonaktif</option><option value="true">aktif</option></select></label>
+            <label>Jalankan pipeline penuh<select id="plEnabled"><option value="true">ya</option><option value="false">tidak (hanya scrape)</option></select></label>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <label>Uji baris Supabase per pipeline<input type="number" id="plPull" min="0" max="20000" step="50" style="width:130px"></label>
+            <label>Push proxy ke Supabase<input type="number" id="plPush" min="0" max="20000" step="50" style="width:130px"></label>
+            <button class="primary" id="btnPlSave">Simpan jadwal</button>
+            <button class="primary" id="btnPlRun">Jalankan sekarang</button>
+            <button class="ghost" id="btnPlStop">Stop siklus</button>
+          </div>
+          <div class="muted" id="plInfo" style="margin-top:10px">—</div>
+        </div>
+        <div class="panel">
+          <h2>Langkah pipeline</h2>
+          <div id="plSteps" class="muted">belum pernah dijalankan</div>
+          <div class="muted" style="margin-top:10px">
+            Urutan: <b>tarik dari Supabase → uji satu per satu → simpan → scrape sumber → simpan → push ke Supabase</b>.
+            Verdict ditulis per batch (hidup = upsert, mati = satu PATCH per 200 id) supaya request ke Supabase tetap sedikit.
+          </div>
+        </div>
+      </section>
+
+      <!-- DOCS -->
+      <section class="view" id="view-docs">
+        <div class="panel">
+          <h2>Endpoint</h2>
+          <div class="api">
+            <div><code>POST /api/login</code> — masuk (body <code>{"username","password"}</code>, cookie sesi)</div>
+            <div><code>POST /api/logout</code> · <code>GET /api/me</code></div>
+            <div><code>GET /api/proxies</code> · <code>GET /api/proxies.txt</code> — filter <code>alive, protocol, country, tls, alt, max_ping, min_sources, fresh_minutes, limit, offset, order</code></div>
+            <div><code>GET /api/countries</code> — jumlah per negara</div>
+            <div><code>GET /api/stats</code> · <code>GET /api/health</code> (publik)</div>
+            <div><code>GET/POST /api/settings</code> — pengaturan (termasuk akun admin, token, public URL)</div>
+            <div><code>POST /api/auto/start</code> · <code>/api/auto/stop</code> · <code>/api/now</code> · <code>/api/stop</code></div>
+            <div><code>POST /api/scrape?cap=&amp;offset=&amp;jobs=&amp;min_sources=</code> · <code>POST /api/purge?hours=24</code></div>
+            <div><code>GET /api/vless/clash?host=&amp;uuid=&amp;port=443</code> · <code>GET /api/vless/raw?host=&amp;uuid=</code></div>
+            <div><code>GET /api/tunnel</code> — status Cloudflare + perintah cloudflared</div>
+            <div class="muted">Klien mesin (panel CFVPN Hub) memakai <code>X-Api-Token: &lt;token&gt;</code> atau <code>?token=</code>; browser memakai cookie sesi.</div>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Contoh</h2>
+          <pre>curl -X POST http://127.0.0.1:8787/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}'
+curl "http://127.0.0.1:8787/api/proxies.txt?max_ping=2000&amp;country=SG,ID&amp;limit=50"
+curl -o vless.yaml "http://127.0.0.1:8787/api/vless/clash?host=&lt;worker&gt;.workers.dev&amp;uuid=&lt;uuid&gt;&amp;limit=100"
+curl -X POST "http://127.0.0.1:8787/api/settings" -H "X-Api-Token: &lt;token&gt;" -H "Content-Type: application/json" -d '{"auto":true,"interval_minutes":15}'</pre>
+          <div class="muted">Dokumentasi lengkap: <code>docs/API.md</code> di repositori.</div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const num = (id) => { const v = $(id).value.trim(); return v === "" ? "" : Number(v); };
+let me = null;
+
+function toast(msg) { const el = $("toast"); el.textContent = msg; el.classList.add("show"); setTimeout(() => el.classList.remove("show"), 2600); }
+function token() { return localStorage.getItem("pan-proxy-scanner-token") || ""; }
+
+async function api(path, init) {
+  const url = new URL(path, location.origin);
+  const res = await fetch(url, init);
+  if (res.status === 401 && path !== "/api/login") { location.replace("/login"); throw new Error("unauthorized"); }
+  return res;
+}
+
+$("nav").addEventListener("click", (event) => {
+  const item = event.target.closest(".nav-item");
+  if (!item) return;
+  const view = item.dataset.view;
+  document.querySelectorAll(".nav-item").forEach((n) => n.classList.toggle("active", n === item));
+  document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === "view-" + view));
+  const titles = { dashboard: ["Dashboard", "ringkasan hasil scraping"], proxies: ["Daftar proxy", "verifikasi nyata SOCKS5 / HTTP CONNECT"], sources: ["Sumber", "katalog daftar proxy"], scheduler: ["Scheduler", "otomatisasi & akun"], tunnel: ["Tunnel CF", "ekspos panel lewat Cloudflare"], supabase: ["Supabase", "sinkronisasi tabel proxy_pool"], pipeline: ["Pipeline", "alur harian: Supabase → uji → sumber → Supabase"], docs: ["Dokumentasi API", "endpoint & contoh"] };
+  $("viewTitle").textContent = titles[view][0];
+  $("viewSub").textContent = titles[view][1];
+  if (view === "tunnel") loadTunnel();
+  if (view === "supabase") loadSupabase();
+  if (view === "pipeline") loadPipeline();
+  if (view === "docs") loadSources();
+});
+
+function query() {
+  const q = new URLSearchParams();
+  const alive = $("fAlive").value; if (alive !== "") q.set("alive", alive);
+  if ($("fProtocol").value) q.set("protocol", $("fProtocol").value);
+  if ($("fCountry").value) q.set("country", $("fCountry").value);
+  if ($("fTls").value === "true") q.set("tls", "true");
+  if ($("fAlt").value === "true") q.set("alt", "true");
+  if (num("fMaxPing") !== "") q.set("max_ping", num("fMaxPing"));
+  if (num("fMinSources") !== "") q.set("min_sources", num("fMinSources"));
+  if (num("fFresh") !== "") q.set("fresh_minutes", num("fFresh"));
+  q.set("limit", num("fLimit") || 200);
+  q.set("order", $("fOrder").value);
+  return q;
+}
+
+function fmtAge(sec) {
+  if (!sec) return "—";
+  const d = Math.floor(Date.now() / 1000) - sec;
+  if (d < 60) return d + "s lalu";
+  if (d < 3600) return Math.floor(d / 60) + "m lalu";
+  if (d < 86400) return Math.floor(d / 3600) + "j lalu";
+  return Math.floor(d / 86400) + "h lalu";
+}
+
+function rowsHTML(list) {
+  return list.map((p, i) => `<tr>
+    <td class="muted">${i + 1}</td>
+    <td><code>${p.ip}:${p.port}</code></td>
+    <td>${p.country || '<span class="muted">—</span>'}</td>
+    <td><span class="pill ${p.alive ? "ok" : "dead"}">${p.alive ? "hidup" : "mati"}</span></td>
+    <td>${p.protocol ? `<span class="pill ${p.protocol}">${p.protocol}</span>` : "—"}</td>
+    <td>${p.tls_ok ? '<span class="pill ok">tls</span>' : '<span class="muted">—</span>'}</td>
+    <td>${p.alt_ok ? '<span class="pill ok">alt</span>' : '<span class="muted">—</span>'}</td>
+    <td class="muted"><code>${p.exit_ip || "—"}</code></td>
+    <td>${p.ping_ms || "—"}</td>
+    <td class="muted">${p.ok_count}/${p.fail_count}</td>
+    <td class="muted">${p.sources}</td>
+    <td class="muted">${fmtAge(p.last_checked)}</td>
+  </tr>`).join("");
+}
+
+async function loadStats() {
+  const data = await api("/api/stats").then((r) => r.json());
+  const s = data.stats, p = data.progress, auto = data.auto || {};
+  $("cards").innerHTML = [["total baris", s.total], ["hidup", s.alive], ["hidup & segar", s.alive_fresh], ["sanggup TLS 443", s.alive_tls], ["sanggup port lain", s.alive_alt], ["socks5", s.alive_socks5], ["http", s.alive_http], ["rata-rata ping", s.avg_ping_ms + " ms"]]
+    .map(([l, v]) => `<div class="card"><div class="label">${l}</div><div class="value">${v}</div></div>`).join("");
+  $("autoPill").textContent = auto.running ? "auto " + auto.interval_minutes + "m" : "auto off";
+  $("autoPill").className = "pill " + (auto.running ? "ok" : "dead");
+  const done = p.checked || 0, total = p.candidates || 0;
+  $("phase").textContent = p.running ? "berjalan: " + p.phase : (p.ended_at ? "selesai " + fmtAge(Math.floor(new Date(p.ended_at).getTime() / 1000)) : "belum pernah jalan");
+  $("progressText").textContent = (p.running || done)
+    ? `kandidat ${total} · diverifikasi ${done} · hidup ${p.alive || 0} · mati ${p.dead || 0} · refresh ${p.refreshed || 0}` + (p.error ? " · error: " + p.error : "")
+    : "—";
+  $("progressBar").style.width = (p.running ? (total ? Math.min(100, Math.round((done / total) * 100)) : 5) : 100) + "%";
+}
+
+async function loadRows() {
+  const data = await api("/api/proxies?" + query().toString()).then((r) => r.json());
+  $("rows").innerHTML = (data.proxies && data.proxies.length) ? rowsHTML(data.proxies) : '<tr><td colspan="12" class="muted">tidak ada proxy yang cocok</td></tr>';
+}
+
+async function loadTop() {
+  const data = await api("/api/proxies?alive=true&max_ping=2500&limit=8").then((r) => r.json());
+  $("topTable").innerHTML = (data.proxies && data.proxies.length)
+    ? `<table><thead><tr><th>Proxy</th><th>Negara</th><th>Protokol</th><th>Ping</th><th>Sumber</th></tr></thead><tbody>${
+        data.proxies.map((p) => `<tr><td><code>${p.ip}:${p.port}</code></td><td>${p.country || "—"}</td><td>${p.protocol}</td><td>${p.ping_ms} ms</td><td class="muted">${p.sources}</td></tr>`).join("")
+      }</tbody></table>`
+    : "belum ada proxy hidup — jalankan siklus";
+}
+
+async function loadCountries() {
+  const data = await api("/api/countries").then((r) => r.json());
+  const sel = $("fCountry"), current = sel.value;
+  sel.innerHTML = '<option value="">semua</option>' + (data.countries || []).filter((c) => c.alive > 0).map((c) => `<option value="${c.country}">${c.country} (${c.alive})</option>`).join("");
+  sel.value = current;
+}
+
+async function loadSources() {
+  const data = await api("/api/sources").then((r) => r.json());
+  $("srcCount").textContent = `${data.enabled || 0} aktif dari ${data.count || 0}`;
+  const list = (data.sources || []).slice().sort((a, b) => (b.count || 0) - (a.count || 0) || a.name.localeCompare(b.name));
+  $("sources").innerHTML = list.length
+    ? `<table><thead><tr><th>Nama</th><th>Jenis</th><th>Status</th><th>Proxy</th><th>ms</th><th>Kesehatan</th><th>URL</th><th>Aktif</th><th></th></tr></thead><tbody>${
+        list.map((s) => `<tr>
+          <td><code>${s.name}</code>${s.optional ? ' <span class="pill">opsional</span>' : ""}${s.auto_disabled ? ' <span class="pill dead">dimatikan otomatis</span>' : ""}</td>
+          <td class="muted">${s.kind || "txt"}</td>
+          <td>${s.status ? s.status : '<span class="muted">—</span>'}${s.error ? ` <span class="muted">${s.error}</span>` : ""}</td>
+          <td>${s.count ?? '<span class="muted">—</span>'}</td>
+          <td class="muted">${s.ms != null ? s.ms : "—"}</td>
+          <td class="muted">${s.zero_streak ? "kosong " + s.zero_streak + "x" : ""}${s.last_error ? " " + s.last_error : ""}</td>
+          <td class="muted" style="max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="${s.url}" target="_blank" rel="noopener" style="color:inherit">${s.url}</a></td>
+          <td><button class="ghost" data-toggle="${s.name}" data-enabled="${s.enabled}">${s.enabled ? "matikan" : "nyalakan"}</button></td>
+          <td><button class="danger" data-del="${s.name}">hapus</button></td>
+        </tr>`).join("")
+      }</tbody></table>`
+    : '<div class="muted">belum ada sumber</div>';
+}
+
+$("sources").addEventListener("click", async (event) => {
+  const del = event.target.closest("[data-del]");
+  const toggle = event.target.closest("[data-toggle]");
+  if (del) {
+    if (!confirm("Hapus sumber " + del.dataset.del + "?")) return;
+    const r = await api("/api/sources?name=" + encodeURIComponent(del.dataset.del), { method: "DELETE" });
+    toast(r.ok ? "sumber dihapus" : "gagal menghapus");
+    loadSources();
+    return;
+  }
+  if (toggle) {
+    const next = toggle.dataset.enabled !== "true";
+    const r = await api("/api/sources/toggle?name=" + encodeURIComponent(toggle.dataset.toggle) + "&enabled=" + next, { method: "POST" });
+    toast(r.ok ? (next ? "sumber diaktifkan" : "sumber dimatikan") : "gagal mengubah");
+    loadSources();
+  }
+});
+
+$("btnAddSource").onclick = async () => {
+  const url = $("srcUrl").value.trim();
+  if (!url) { toast("isi URL sumber dulu"); return; }
+  const res = await api("/api/sources", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, name: $("srcName").value.trim(), kind: $("srcKind").value, optional: $("srcOptional").value === "true" }),
+  });
+  const data = await res.json();
+  if (!res.ok) { toast("gagal: " + (data.error || res.status)); return; }
+  $("srcUrl").value = ""; $("srcName").value = "";
+  toast("sumber " + (data.added || "") + " ditambahkan — ikut dipakai pada siklus berikutnya");
+  loadSources();
+};
+
+function fillSettings(s) {
+  $("sAuto").value = String(s.auto);
+  $("sInterval").value = s.interval_minutes; $("sCap").value = s.cap; $("sJobs").value = s.jobs;
+  $("sMinSources").value = s.min_sources; $("sRefreshLimit").value = s.refresh_limit;
+  $("sRefreshAfter").value = s.refresh_after_minutes; $("sFresh").value = s.fresh_minutes;
+  $("sPurge").value = s.purge_dead_hours; $("sAdminUser").value = s.admin_user || "admin";
+  $("sAdminPass").value = ""; $("sToken").value = s.token || ""; $("sPublicUrl").value = s.public_url || "";
+  $("sTunnelName").value = s.tunnel_name || "pan-proxy-scanner"; $("sTunnelDomain").value = s.tunnel_domain || "";
+}
+
+async function loadSettings() {
+  const data = await api("/api/settings").then((r) => r.json());
+  fillSettings(data.settings);
+  const rt = data.runtime || {};
+  $("runtime").innerHTML = `bind <code>${rt.addr || "-"}</code> · LAN: <code>${(rt.lan_urls || []).join(", ") || "(tidak ada)"}</code> · pengaturan <code>${rt.db || "-"}</code> · token: ${rt.api_token_required ? "wajib" : "tidak"} · otomatis: ${rt.auto_running ? "aktif" : "nonaktif"}`;
+}
+
+async function loadMe() {
+  const res = await fetch("/api/me");
+  if (res.status === 401) { location.replace("/login"); return false; }
+  me = await res.json();
+  $("whoami").textContent = me.user || "admin";
+  return true;
+}
+
+async function loadTunnel() {
+  const data = await api("/api/tunnel").then((r) => r.json());
+  const badge = data.via_cloudflare
+    ? `<span class="pill ok">request ini lewat Cloudflare (Cf-Ray ${data.cf_ray})</span>`
+    : `<span class="pill dead">request ini langsung (belum lewat tunnel)</span>`;
+  const listen = data.listen || {};
+  $("tunnelInfo").innerHTML = `
+    <div style="margin-bottom:10px">${badge}</div>
+    <div>Panel listen di <code>${listen.addr || "-"}</code> (${listen.note || "-"}) — port <b>${listen.port || "-"}</b>, host <code>${listen.host || "-"}</code></div>
+    <div style="margin-top:4px">URL lokal: ${(data.local_urls || []).map((u) => `<code>${u}</code>`).join(" ")}</div>
+    <div>Public URL tersimpan: ${data.public_url ? `<code>${data.public_url}</code>` : '<span class="muted">belum diisi (menu Scheduler → Akun &amp; API)</span>'}</div>
+    <div>Domain tunnel: <code>${data.tunnel_domain || "(belum diisi)"}</code> · nama tunnel: <code>${data.tunnel_name || "pan-proxy-scanner"}</code></div>
+    <div class="muted" style="margin-top:4px">Konfigurasi dari <code>${data.env_file || ".env"}</code> dan <code>${data.settings_file || "-"}</code></div>
+
+    <h2 style="margin-top:16px">1. Quick tunnel (tanpa domain)</h2>
+    <pre>${data.quick_tunnel_command}</pre>
+
+    <h2>2. Named tunnel dengan domain sendiri</h2>
+    <pre>${(data.named_tunnel_steps || []).join("\n")}</pre>
+
+    <h2>3. config.yml (opsional, kalau jalan sebagai service)</h2>
+    <pre>${data.config_yaml || ""}</pre>
+
+    <ul class="muted">${(data.notes || []).map((n) => `<li>${n}</li>`).join("")}</ul>`;
+}
+
+async function loadSupabase() {
+  const data = await api("/api/supabase/status").then((r) => r.json());
+  $("sbUrl").value = data.url || "";
+  $("sbTable").value = data.table || "proxy_pool";
+  $("sbKey").value = "";
+  $("sbKey").placeholder = data.has_key ? "sudah diisi (kosongkan bila tidak diganti)" : "anon/service key";
+  $("sbAuto").value = String(!!data.auto_push);
+  $("sbPull").value = data.pull_limit || 0;
+  $("sbPruneDays").value = data.prune_days ?? 7;
+  $("sbTls").value = String(data.probe_tls !== false);
+  $("sbAlt").value = String(data.probe_alt !== false);
+  $("sbPushTls").value = String(data.push_require_tls !== false);
+  $("sbAutoDisable").value = String(data.auto_disable_sources !== false);
+  $("sbStreak").value = data.zero_streak_limit ?? 3;
+  const last = data.last_sync ? `${data.last_sync.at} — ${data.last_sync.note}${data.last_sync.error ? " (error: " + data.last_sync.error + ")" : ""}` : "belum ada sinkronisasi";
+  $("sbStatus").innerHTML = [
+    `status: ${data.configured ? "<b>terkonfigurasi</b>" : "belum diisi"}`,
+    data.remote_total != null ? `baris di Supabase: <b>${data.remote_total}</b> (aktif ${data.remote_alive})` : "",
+    data.remote_error ? `error: ${data.remote_error}` : "",
+    `sinkron terakhir: ${last}`,
+  ].filter(Boolean).join(" · ");
+}
+
+async function sbSave() {
+  const patch = {
+    supabase_url: $("sbUrl").value.trim(),
+    supabase_table: $("sbTable").value.trim() || "proxy_pool",
+    supabase_auto_push: $("sbAuto").value === "true",
+    supabase_pull_limit: num("sbPull") || 0,
+    supabase_prune_days: num("sbPruneDays") || 0,
+    probe_tls: $("sbTls").value === "true",
+    probe_alt: $("sbAlt").value === "true",
+    push_require_tls: $("sbPushTls").value === "true",
+    auto_disable_sources: $("sbAutoDisable").value === "true",
+    zero_streak_limit: num("sbStreak") || 0,
+  };
+  if ($("sbKey").value.trim()) patch.supabase_key = $("sbKey").value.trim();
+  await postSettings(patch, "konfigurasi Supabase disimpan");
+  loadSupabase();
+}
+
+$("btnSbSave").onclick = sbSave;
+$("btnSbTest").onclick = async () => {
+  const res = await api("/api/supabase/test", { method: "POST" });
+  const data = await res.json();
+  toast(res.ok ? `ok — ${data.total} baris (aktif ${data.alive}) di ${data.table}` : "gagal: " + (data.error || res.status));
+  loadSupabase();
+};
+$("btnSbPush").onclick = async () => {
+  const limit = num("sbLimit") || 50;
+  const res = await api("/api/supabase/push?limit=" + limit, { method: "POST" });
+  const data = await res.json();
+  toast(res.ok ? `${data.pushed} proxy dikirim ke ${data.table}` : "gagal: " + (data.error || res.status));
+  loadSupabase();
+};
+$("btnSbPrune").onclick = async () => {
+  const days = num("sbPruneDays") || 7;
+  const res = await api("/api/supabase/prune?days=" + days + "&limit=2000", { method: "POST" });
+  const data = await res.json();
+  toast(res.ok ? `${data.deleted} baris mati dihapus (dari ${data.kandidat_sebelumnya} kandidat)` : "gagal: " + (data.error || res.status));
+  loadSupabase();
+};
+$("btnSbPull").onclick = async () => {
+  const limit = num("sbLimit") || 50;
+  toast("menarik & memverifikasi " + limit + " baris…");
+  const res = await api("/api/supabase/pull-verify?limit=" + limit, { method: "POST" });
+  const data = await res.json();
+  toast(res.ok ? `selesai — dicek ${data.checked}, hidup ${data.alive}, mati ${data.dead}` : "gagal: " + (data.error || res.status));
+  await loadSupabase();
+  reload();
+};
+
+async function loadPipeline() {
+  const data = await api("/api/pipeline").then((r) => r.json());
+  const c = data.config || {}, p = data.pipeline || {};
+  $("plMode").value = c.schedule_mode || "daily";
+  $("plDailyAt").value = c.daily_at || "05:30";
+  $("plInterval").value = c.interval_minutes || 30;
+  $("plAuto").value = String(!!c.auto);
+  $("plEnabled").value = String(!!c.pipeline_enabled);
+  $("plPull").value = c.pipeline_pull_limit ?? 500;
+  $("plPush").value = c.pipeline_push_limit ?? 1000;
+  $("plInfo").innerHTML = [
+    `penjadwal: ${c.scheduler_running ? "aktif" : "nonaktif"}`,
+    c.schedule_mode === "daily" ? `jam harian ${c.daily_at}` : `interval ${c.interval_minutes} menit`,
+    c.next_run ? `jadwal berikutnya ${c.next_run}` : "",
+    p.running ? "<b>pipeline sedang berjalan</b>" : (p.ended_at ? `selesai ${p.ended_at}` : "belum pernah jalan"),
+    p.error ? `error: ${p.error}` : "",
+  ].filter(Boolean).join(" · ");
+  const steps = p.steps || [];
+  $("plSteps").innerHTML = steps.length
+    ? `<table><thead><tr><th>Langkah</th><th>Status</th><th>Hasil</th><th>ms</th></tr></thead><tbody>${
+        steps.map((s) => `<tr><td>${s.name}</td><td><span class="pill ${s.ok ? "ok" : "dead"}">${s.ok ? "ok" : "gagal"}</span></td><td class="muted">${s.note || ""}${s.counts ? " — " + Object.entries(s.counts).map(([k, v]) => k + " " + v).join(", ") : ""}</td><td class="muted">${s.ms || 0}</td></tr>`).join("")
+      }</tbody></table>`
+    : '<div class="muted">belum pernah dijalankan</div>';
+}
+
+$("btnPlSave").onclick = () => postSettings({
+  schedule_mode: $("plMode").value,
+  daily_at: $("plDailyAt").value.trim(),
+  interval_minutes: num("plInterval") || 30,
+  auto: $("plAuto").value === "true",
+  pipeline_enabled: $("plEnabled").value === "true",
+  pipeline_pull_limit: num("plPull") || 0,
+  pipeline_push_limit: num("plPush") || 0,
+}, "jadwal disimpan");
+$("btnPlRun").onclick = async () => {
+  const res = await api("/api/pipeline/run", { method: "POST" });
+  const data = await res.json();
+  toast(res.ok ? "pipeline dimulai" : "gagal: " + (data.error || res.status));
+  loadPipeline();
+};
+$("btnPlStop").onclick = async () => { await api("/api/stop", { method: "POST" }); toast("siklus dihentikan"); loadPipeline(); };
+
+async function reload() {
+  await Promise.all([loadStats(), loadRows(), loadTop(), loadCountries()]);
+}
+
+async function postSettings(patch, note) {
+  const res = await api("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+  const data = await res.json();
+  if (!res.ok) { toast("gagal: " + (data.error || res.status)); return; }
+  fillSettings(data.settings); toast(note || "disimpan"); await loadSettings(); await reload();
+}
+
+$("btnReload").onclick = () => { loadSettings(); reload(); loadSources(); toast("dimuat ulang"); };
+$("btnNow").onclick = async () => { const r = await api("/api/now", { method: "POST" }); const d = await r.json(); toast(r.ok ? "siklus dimulai" : "gagal: " + (d.error || r.status)); reload(); };
+$("btnFilter").onclick = () => { loadRows(); toast("filter diterapkan"); };
+$("btnCopy").onclick = async () => {
+  const text = await api("/api/proxies.txt?" + query().toString()).then((r) => r.text());
+  await navigator.clipboard.writeText(text);
+  toast(text.trim().split("\n").length + " proxy dicopy");
+};
+function openExport(kind) {
+  const host = $("cHost").value.trim(), uuid = $("cUuid").value.trim();
+  if (!host || !uuid) { toast("isi host worker dan uuid dulu"); return; }
+  const q = query(); q.set("host", host); q.set("uuid", uuid);
+  window.open("/api/vless/" + kind + "?" + q.toString(), "_blank");
+}
+$("btnClash").onclick = () => openExport("clash");
+$("btnRaw").onclick = () => openExport("raw");
+$("btnSave").onclick = () => postSettings({
+  auto: $("sAuto").value === "true", interval_minutes: num("sInterval"), cap: num("sCap"), jobs: num("sJobs"),
+  min_sources: num("sMinSources"), refresh_limit: num("sRefreshLimit"), refresh_after_minutes: num("sRefreshAfter"),
+  fresh_minutes: num("sFresh"), purge_dead_hours: num("sPurge"),
+});
+$("btnSaveAccount").onclick = () => {
+  const patch = { admin_user: $("sAdminUser").value.trim(), token: $("sToken").value.trim(), public_url: $("sPublicUrl").value.trim(), tunnel_name: $("sTunnelName").value.trim(), tunnel_domain: $("sTunnelDomain").value.trim() };
+  if ($("sAdminPass").value) patch.admin_password = $("sAdminPass").value;
+  postSettings(patch, "akun & API disimpan");
+};
+$("btnAutoStart").onclick = async () => { const r = await api("/api/auto/start", { method: "POST" }); const d = await r.json(); toast(r.ok ? "otomatis dinyalakan" : "gagal: " + (d.error || r.status)); if (d.settings) fillSettings(d.settings); reload(); };
+$("btnAutoStop").onclick = async () => { await api("/api/auto/stop", { method: "POST" }); toast("otomatis dimatikan"); await loadSettings(); reload(); };
+$("btnStopCycle").onclick = async () => { const r = await api("/api/stop", { method: "POST" }); toast(r.ok ? "siklus dihentikan" : "tidak ada siklus berjalan"); reload(); };
+$("btnPurge").onclick = async () => { const hours = num("sPurge") || 24; const r = await api("/api/purge?hours=" + hours, { method: "POST" }); const d = await r.json(); toast(r.ok ? d.removed + " catatan mati dihapus" : "gagal"); reload(); };
+$("btnLogout").onclick = async () => { await fetch("/api/logout", { method: "POST" }); location.replace("/login"); };
+
+(async () => {
+  if (!(await loadMe())) return;
+  await loadSettings();
+  await reload();
+  await loadSources();
+  setInterval(loadStats, 4000);
+})();
+</script>
+</body>
+</html>

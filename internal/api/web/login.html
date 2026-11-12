@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Masuk — Pan Proxy Scanner</title>
+<style>
+  :root { --bg:#07111f; --panel:#0d1a2b; --panel2:#101f33; --border:#1e3350; --fg:#e8eef7; --muted:#8ba3c0; --accent:#37c8ff; --err:#ff6b6b; --ok:#3ddc97; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:radial-gradient(1200px 600px at 20% -10%, #10304d 0%, var(--bg) 55%); color:var(--fg);
+         font:14px/1.5 system-ui, "Segoe UI", Roboto, sans-serif; display:flex; align-items:center; justify-content:center; padding:24px; }
+  .card { width:100%; max-width:380px; background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:26px 24px; box-shadow:0 20px 60px rgba(0,0,0,.45); }
+  .brand { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+  .logo { width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,#1580bb,#37c8ff); display:grid; place-items:center; font-weight:700; color:#04121f; }
+  h1 { font-size:19px; margin:0; letter-spacing:.3px; }
+  h1 span { color:var(--accent); }
+  p.sub { color:var(--muted); margin:6px 0 20px; font-size:13px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:12px 0 4px; text-transform:uppercase; letter-spacing:.5px; }
+  input { width:100%; background:var(--panel2); color:var(--fg); border:1px solid var(--border); border-radius:10px; padding:11px 12px; font:inherit; }
+  input:focus { outline:none; border-color:var(--accent); }
+  button { width:100%; margin-top:18px; padding:11px 12px; border-radius:10px; border:1px solid #1e8fcb; color:#eaf6ff; font:inherit; cursor:pointer;
+           background:linear-gradient(180deg,#1580bb,#0d5f8c); }
+  button:disabled { opacity:.6; cursor:default; }
+  .msg { margin-top:14px; font-size:13px; min-height:18px; }
+  .msg.err { color:var(--err); }
+  .msg.ok { color:var(--ok); }
+  .hint { margin-top:18px; padding-top:14px; border-top:1px solid var(--border); color:var(--muted); font-size:12px; }
+  code { background:var(--panel2); padding:2px 6px; border-radius:6px; }
+</style>
+</head>
+<body>
+<form class="card" id="form">
+  <div class="brand">
+    <div class="logo">PS</div>
+    <h1>Proxy <span>Scraping</span></h1>
+  </div>
+  <p class="sub">Panel scraping proxy — masuk untuk mengelola sumber, verifikasi, dan API.</p>
+
+  <label for="u">Username</label>
+  <input id="u" name="username" autocomplete="username" value="admin" required>
+  <label for="p">Password</label>
+  <input id="p" name="password" type="password" autocomplete="current-password" value="admin" required>
+
+  <button id="btn" type="submit">Masuk</button>
+  <div class="msg" id="msg"></div>
+
+  <div class="hint">
+    Default: <code>admin</code> / <code>admin</code>. Ganti di menu <b>Scheduler &amp; pengaturan</b> setelah masuk
+    (atau dengan <code>POST /api/settings</code>).
+  </div>
+</form>
+
+<script>
+const form = document.getElementById("form");
+const msg = document.getElementById("msg");
+const btn = document.getElementById("btn");
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  msg.className = "msg";
+  msg.textContent = "memeriksa…";
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: document.getElementById("u").value, password: document.getElementById("p").value }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      msg.className = "msg ok";
+      msg.textContent = "berhasil, membuka dashboard…";
+      location.replace("/");
+      return;
+    }
+    msg.className = "msg err";
+    msg.textContent = data.error || ("gagal masuk (" + res.status + ")");
+  } catch (err) {
+    msg.className = "msg err";
+    msg.textContent = "tidak bisa menghubungi server: " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

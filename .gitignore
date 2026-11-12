@@ -1,0 +1,12 @@
+# berkas lokal
+.env
+pan-proxy-scanner.exe
+pan-proxy-scanner
+proxies.db
+proxies.db-shm
+proxies.db-wal
+*.log
+*.tmp
+
+# hasil build
+/dist/
