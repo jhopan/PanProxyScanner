@@ -141,9 +141,20 @@ cloudflared tunnel route dns panproxyscanner scraping.domainmu.com
 cloudflared tunnel run --url http://localhost:8787 panproxyscanner
 ```
 
-Perintahnya juga ditampilkan lengkap di halaman **Tunnel CF**, beserta status apakah
-permintaan saat ini sudah lewat Cloudflare (header `Cf-Ray`). Kalau panel dibuka ke publik,
-**isi Token API** supaya `/api/*` tidak bisa dipakai orang lain.
+Perintahnya juga ditampilkan lengkap di halaman **Tunnel CF**, yang sekaligus melaporkan
+**kondisi tunnel** — bukan cuma konfigurasi:
+
+- status unit systemd `cloudflared-<nama tunnel>.service` (aktif/nonaktif, `enabled`, waktu
+  mulai, jumlah restart);
+- uji jalur publik: panel memanggil `/api/health` miliknya sendiri lewat **Public URL**, jadi
+  "tembus" berarti rute Cloudflare benar-benar sampai ke panel (tombol **Uji ulang** memaksa
+  uji baru);
+- jalur yang dipakai request saat ini: LAN/langsung atau lewat Cloudflare (header `Cf-Ray`),
+  plus host dan IP asal.
+
+Kalau panel dibuka ke publik, **isi Token API** supaya `/api/*` tidak bisa dipakai orang lain.
+Halaman **Dokumentasi API** menyusun contoh `curl` mengikuti alamat yang sedang dipakai
+(LAN atau tunnel), jadi bisa langsung disalin tanpa ganti host.
 
 Siklus otomatis mengikuti `auto` di `settings.json` (bawaan: nonaktif, interval 30 menit).
 Nyalakan dari panel website atau `POST /api/auto/start`, atau jalankan pertama kali dengan

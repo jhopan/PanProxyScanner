@@ -251,8 +251,16 @@
       <!-- TUNNEL -->
       <section class="view" id="view-tunnel">
         <div class="panel">
+          <h2>Kondisi tunnel</h2>
+          <div id="tunnelState" class="muted">memuat...</div>
+          <div class="row" style="margin-top:10px">
+            <button class="primary" id="btnTunnelProbe">Uji ulang</button>
+            <span class="muted" id="tunnelStateAt"></span>
+          </div>
+        </div>
+        <div class="panel">
           <h2>Cloudflare Tunnel</h2>
-          <div id="tunnelInfo" class="muted">memuat…</div>
+          <div id="tunnelInfo" class="muted">memuat...</div>
         </div>
       </section>
 
@@ -275,6 +283,11 @@
             <button class="ghost" id="btnPlStop">Stop siklus</button>
           </div>
           <div class="muted" id="plInfo" style="margin-top:10px">—</div>
+          <div class="muted" style="margin-top:6px">
+            Jadwal berjalan hanya kalau <b>Penjadwal aktif</b> = aktif dan <b>Jalankan pipeline penuh</b> = ya.
+            Pilih mode <b>interval</b> untuk "tiap N menit" (mis. 120 = tiap 2 jam) atau <b>harian</b> untuk jam tetap,
+            lalu tekan <b>Simpan jadwal</b>.
+          </div>
         </div>
         <div class="panel">
           <h2>Langkah pipeline</h2>
@@ -306,11 +319,9 @@
         </div>
         <div class="panel">
           <h2>Contoh</h2>
-          <pre>curl -X POST http://127.0.0.1:8787/api/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}'
-curl "http://127.0.0.1:8787/api/proxies.txt?max_ping=2000&amp;country=SG,ID&amp;limit=50"
-curl -o vless.yaml "http://127.0.0.1:8787/api/vless/clash?host=&lt;worker&gt;.workers.dev&amp;uuid=&lt;uuid&gt;&amp;limit=100"
-curl -X POST "http://127.0.0.1:8787/api/settings" -H "X-Api-Token: &lt;token&gt;" -H "Content-Type: application/json" -d '{"auto":true,"interval_minutes":15}'</pre>
-          <div class="muted">Dokumentasi lengkap: <code>docs/API.md</code> di repositori.</div>
+          <div class="muted" id="docsAccess" style="margin-bottom:8px">memuat alamat akses...</div>
+          <pre id="docsExamples">memuat...</pre>
+          <div class="muted">Contoh mengikuti alamat yang sedang kamu pakai (LAN atau tunnel), jadi bisa langsung disalin. Dokumentasi lengkap: <code>docs/API.md</code> di repositori.</div>
         </div>
       </section>
     </div>
@@ -322,6 +333,7 @@ curl -X POST "http://127.0.0.1:8787/api/settings" -H "X-Api-Token: &lt;token&gt;
 const $ = (id) => document.getElementById(id);
 const num = (id) => { const v = $(id).value.trim(); return v === "" ? "" : Number(v); };
 let me = null;
+let lastSettings = null;
 
 function toast(msg) { const el = $("toast"); el.textContent = msg; el.classList.add("show"); setTimeout(() => el.classList.remove("show"), 2600); }
 function token() { return localStorage.getItem("panproxyscanner-token") || ""; }
@@ -345,7 +357,7 @@ $("nav").addEventListener("click", (event) => {
   if (view === "tunnel") loadTunnel();
   if (view === "supabase") loadSupabase();
   if (view === "pipeline") loadPipeline();
-  if (view === "docs") loadSources();
+  if (view === "docs") loadDocs();
 });
 
 function query() {
@@ -480,6 +492,7 @@ $("btnAddSource").onclick = async () => {
 };
 
 function fillSettings(s) {
+  lastSettings = s;
   $("sAuto").value = String(s.auto);
   $("sInterval").value = s.interval_minutes; $("sCap").value = s.cap; $("sJobs").value = s.jobs;
   $("sMinSources").value = s.min_sources; $("sRefreshLimit").value = s.refresh_limit;
@@ -504,14 +517,37 @@ async function loadMe() {
   return true;
 }
 
+// renderTunnelState menampilkan kondisi tunnel: layanan cloudflared, uji jalur publik, dan
+// jalur yang dipakai request saat ini (LAN vs Cloudflare).
+function renderTunnelState(data) {
+  const state = data.state || {}, svc = state.service || {}, probe = state.public || {};
+  const svcPill = svc.active === "active"
+    ? '<span class="pill ok">aktif</span>'
+    : `<span class="pill dead">${svc.available ? (svc.active || "tidak aktif") : "tak terpantau"}</span>`;
+  const probePill = probe.ok
+    ? '<span class="pill ok">tembus</span>'
+    : `<span class="pill dead">${probe.error ? "gagal" : "belum diuji"}</span>`;
+  const accessPill = data.via_cloudflare
+    ? '<span class="pill ok">lewat Cloudflare</span>'
+    : '<span class="pill dead">langsung / LAN</span>';
+  const rows = [
+    ["Layanan tunnel", `${svcPill} <code>${svc.unit || "-"}</code>${svc.enabled ? " · " + svc.enabled : ""}${svc.sub ? " · " + svc.sub : ""}${svc.restarts && svc.restarts !== "0" ? " · restart " + svc.restarts + "×" : ""}`],
+    ["Jalur publik", `${probePill}${probe.url ? " <code>" + probe.url + "</code>" : ""}${probe.ok ? " · " + probe.ms + " ms" : ""}${probe.error ? " · " + probe.error : ""}`],
+    ["Akses panel sekarang", `${accessPill} <code>${data.forwarded_host || location.host}</code>${data.cf_connecting_ip ? " · dari " + data.cf_connecting_ip : ""}`],
+    ["Mulai sejak", svc.since || "-"],
+  ];
+  $("tunnelState").innerHTML = `<table><tbody>${rows.map(([k, v]) => `<tr><th style="width:220px">${k}</th><td>${v}</td></tr>`).join("")}</tbody></table>`;
+  const notes = [];
+  if (state.checked_at) notes.push("hasil uji " + fmtAge(Math.floor(new Date(state.checked_at).getTime() / 1000)));
+  if (svc.error) notes.push(svc.error);
+  $("tunnelStateAt").textContent = notes.join(" · ");
+}
+
 async function loadTunnel() {
   const data = await api("/api/tunnel").then((r) => r.json());
-  const badge = data.via_cloudflare
-    ? `<span class="pill ok">request ini lewat Cloudflare (Cf-Ray ${data.cf_ray})</span>`
-    : `<span class="pill dead">request ini langsung (belum lewat tunnel)</span>`;
+  renderTunnelState(data);
   const listen = data.listen || {};
   $("tunnelInfo").innerHTML = `
-    <div style="margin-bottom:10px">${badge}</div>
     <div>Panel listen di <code>${listen.addr || "-"}</code> (${listen.note || "-"}) — port <b>${listen.port || "-"}</b>, host <code>${listen.host || "-"}</code></div>
     <div style="margin-top:4px">URL lokal: ${(data.local_urls || []).map((u) => `<code>${u}</code>`).join(" ")}</div>
     <div>Public URL tersimpan: ${data.public_url ? `<code>${data.public_url}</code>` : '<span class="muted">belum diisi (menu Scheduler → Akun &amp; API)</span>'}</div>
@@ -528,6 +564,35 @@ async function loadTunnel() {
     <pre>${data.config_yaml || ""}</pre>
 
     <ul class="muted">${(data.notes || []).map((n) => `<li>${n}</li>`).join("")}</ul>`;
+}
+
+$("btnTunnelProbe").onclick = async () => {
+  $("tunnelStateAt").textContent = "menguji jalur publik...";
+  const data = await api("/api/tunnel?probe=1").then((r) => r.json());
+  renderTunnelState(data);
+  const probe = (data.state || {}).public || {};
+  toast(probe.ok ? `jalur publik tembus (${probe.ms} ms)` : "uji jalur publik gagal: " + (probe.error || "tidak diketahui"));
+};
+
+// loadDocs menyusun contoh API mengikuti alamat yang sedang dipakai: LAN atau tunnel.
+async function loadDocs() {
+  const data = await api("/api/tunnel").then((r) => r.json());
+  const viaCF = !!data.via_cloudflare;
+  const user = (lastSettings && lastSettings.admin_user) || "admin";
+  const lan = (data.local_urls || []).filter((u) => !/localhost|127\.0\.0\.1/.test(u));
+  const other = viaCF ? lan : (data.public_url ? [data.public_url] : []);
+  $("docsAccess").innerHTML = `Kamu membuka panel lewat <b>${viaCF ? "Cloudflare Tunnel" : "jaringan lokal (LAN)"}</b> — <code>${location.origin}</code>`
+    + (other.length ? ` · alamat lain: ${other.map((u) => `<code>${u}</code>`).join(" ")}` : "");
+  const examples = (base) => [
+    `# alamat dasar: ${base}`,
+    `curl -X POST ${base}/api/login -H "Content-Type: application/json" -d '{"username":"${user}","password":"<sandi>"}'`,
+    `curl "${base}/api/proxies.txt?max_ping=2000&country=SG,ID&limit=50"`,
+    `curl -o vless.yaml "${base}/api/vless/clash?host=<worker>.workers.dev&uuid=<uuid>&limit=100"`,
+    `curl -X POST "${base}/api/settings" -H "X-Api-Token: <token>" -H "Content-Type: application/json" -d '{"auto":true,"interval_minutes":15}'`,
+  ].join("\n");
+  const blocks = [examples(location.origin)];
+  if (other.length) blocks.push(`# dari ${viaCF ? "LAN" : "internet (tunnel)"}\n` + examples(other[0]));
+  $("docsExamples").textContent = blocks.join("\n\n");
 }
 
 async function loadSupabase() {

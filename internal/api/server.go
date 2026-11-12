@@ -52,6 +52,13 @@ type Server struct {
 	pipelineMu  sync.Mutex
 	pipelineRun sync.Mutex
 	pipeline    PipelineStatus
+
+	// tunnelMu melindungi kondisi tunnel (tunnelstate.go): hasil uji jalur publik disegarkan
+	// di latar belakang supaya handler /api/tunnel tidak ikut menunggu jaringan.
+	tunnelMu      sync.Mutex
+	tunnelState   tunnelState
+	tunnelStateAt time.Time
+	tunnelProbing bool
 }
 
 // New membuat server. `cfgPath` adalah lokasi settings.json (dipakai saat menyimpan).
@@ -947,7 +954,11 @@ func (s *Server) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		steps[2] = "cloudflared tunnel route dns " + cfg.TunnelName + " " + cfg.TunnelDomain + "   # sudah diatur di pengaturan"
 	}
 
+	// Kondisi tunnel: status unit systemd + hasil uji jalur publik. ?probe=1 memaksa uji baru.
+	force := r.URL.Query().Get("probe") == "1"
+
 	writeJSON(w, http.StatusOK, map[string]any{
+		"state": s.tunnelStateFor(cfg, force),
 		"listen": map[string]any{
 			"addr":     s.addr,
 			"host":     host,

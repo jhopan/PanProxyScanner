@@ -399,6 +399,11 @@ Cloudflare.
   "cf_connecting_ip": "103.x.x.x",
   "forwarded_host": "scraping.example.com",
   "via_cloudflare": true,
+  "state": {
+    "service": { "unit": "cloudflared-panproxyscanner.service", "available": true, "load": "loaded", "active": "active", "sub": "running", "enabled": "enabled", "since": "Thu 2026-11-12 23:00:28 WIB", "restarts": "0" },
+    "public": { "url": "https://scraping.example.com/api/health", "ok": true, "status": 200, "ms": 231, "checked_at": "2026-11-13T07:20:11+08:00" },
+    "checked_at": "2026-11-13T07:20:11+08:00"
+  },
   "quick_tunnel_command": "cloudflared tunnel --url http://localhost:8787",
   "named_tunnel_steps": [
     "cloudflared tunnel login",
@@ -423,6 +428,27 @@ apakah LAN ikut bisa mengakses (`0.0.0.0`) atau hanya mesin lokal (`127.0.0.1`).
 
 Kolom `via_cloudflare` bernilai `true` bila permintaan memuat header `Cf-Ray`, yaitu saat
 diakses lewat tunnel Cloudflare.
+
+#### Kondisi tunnel (`state`)
+
+Objek `state` dipakai halaman **Tunnel CF** untuk menampilkan kondisi nyata, bukan cuma
+konfigurasi:
+
+- `state.service` — status unit systemd `cloudflared-<tunnel_name>.service` (nama yang dipasang
+  installer): `available` (unit dikenal), `active`/`sub` (mis. `active`/`running`), `enabled`,
+  `since`, `restarts`. Di sistem tanpa systemd (Windows, Termux) nilainya `available:false`
+  plus `error`, bukan galat HTTP.
+- `state.public` — hasil panel memanggil `/api/health` **miliknya sendiri lewat Public URL**,
+  jadi `ok:true` berarti jalur Cloudflare benar-benar tembus dari luar sampai ke panel
+  (`status`, `ms`, `checked_at`).
+
+Uji jalur publik disegarkan di latar belakang (paling cepat tiap 30 detik) supaya
+`GET /api/tunnel` tidak ikut menunggu jaringan. Pakai `?probe=1` untuk memaksa uji baru dan
+menunggu hasilnya — itu yang dipanggil tombol **Uji ulang**:
+
+```bash
+curl "http://127.0.0.1:8787/api/tunnel?probe=1" -H "X-Api-Token: <token>"
+```
 
 ---
 
