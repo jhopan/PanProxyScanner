@@ -91,7 +91,7 @@ func Default() Settings {
 		AdminUser:           "admin",
 		AdminPasswordHash:   DefaultPasswordHash(),
 		PublicURL:           "",
-		TunnelName:          "pan-proxy-scanner",
+		TunnelName:          "panproxyscanner",
 		TunnelDomain:        "",
 		SupabaseURL:         "",
 		SupabaseKey:         "",
@@ -240,7 +240,7 @@ func ConfigDir() string {
 	if err != nil {
 		return "."
 	}
-	return filepath.Join(home, ".pan-proxy-scanner")
+	return filepath.Join(home, ".panproxyscanner")
 }
 
 // Load membaca settings.json; berkas tidak ada → pakai default.

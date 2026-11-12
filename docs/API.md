@@ -1,4 +1,4 @@
-# API — Pan Proxy Scanner
+# API — Pan ProxyScanner
 
 Base URL default: `http://<host>:8787` (bind bawaan `0.0.0.0`, jadi bisa dipanggil dari LAN).
 
@@ -63,7 +63,7 @@ PS_DB=proxies.db
 PS_ADMIN_USER=admin
 PS_ADMIN_PASSWORD=admin
 # PS_API_TOKEN=token-klien-mesin
-PS_TUNNEL_NAME=pan-proxy-scanner
+PS_TUNNEL_NAME=panproxyscanner
 PS_TUNNEL_DOMAIN=
 PS_PUBLIC_URL=
 ```
@@ -391,9 +391,9 @@ Cloudflare.
   "listen": { "addr": "0.0.0.0:8787", "host": "0.0.0.0", "port": "8787", "bind_lan": true, "note": "listen di semua interface (LAN bisa akses)" },
   "local_urls": ["http://localhost:8787", "http://192.168.42.124:8787"],
   "env_file": ".env",
-  "settings_file": "C:\\Users\\ACER\\.pan-proxy-scanner\\settings.json",
+  "settings_file": "C:\\Users\\ACER\\.panproxyscanner\\settings.json",
   "public_url": "https://scraping.example.com",
-  "tunnel_name": "pan-proxy-scanner",
+  "tunnel_name": "panproxyscanner",
   "tunnel_domain": "scraping.example.com",
   "cf_ray": "8f2c1a...-CGK",
   "cf_connecting_ip": "103.x.x.x",
@@ -402,11 +402,11 @@ Cloudflare.
   "quick_tunnel_command": "cloudflared tunnel --url http://localhost:8787",
   "named_tunnel_steps": [
     "cloudflared tunnel login",
-    "cloudflared tunnel create pan-proxy-scanner",
-    "cloudflared tunnel route dns pan-proxy-scanner scraping.example.com",
-    "cloudflared tunnel run --url http://localhost:8787 pan-proxy-scanner"
+    "cloudflared tunnel create panproxyscanner",
+    "cloudflared tunnel route dns panproxyscanner scraping.example.com",
+    "cloudflared tunnel run --url http://localhost:8787 panproxyscanner"
   ],
-  "config_yaml": "tunnel: pan-proxy-scanner\ncredentials-file: <path>\n\ningress:\n  - hostname: scraping.example.com\n    service: http://localhost:8787\n    originRequest:\n      noTLSVerify: true\n  - service: http_status:404\n",
+  "config_yaml": "tunnel: panproxyscanner\ncredentials-file: <path>\n\ningress:\n  - hostname: scraping.example.com\n    service: http://localhost:8787\n    originRequest:\n      noTLSVerify: true\n  - service: http_status:404\n",
   "notes": ["Panel ini bind 0.0.0.0:8787 — cloudflared dijalankan di mesin yang sama, mengarah ke http://localhost:8787.", "..."]
 }
 ```
@@ -499,7 +499,7 @@ ramping tanpa perlu tombol manual.
   "runtime": {
     "addr": "0.0.0.0:8787",
     "lan_urls": ["http://192.168.1.10:8787"],
-    "db": "C:\\Users\\ACER\\.pan-proxy-scanner\\settings.json",
+    "db": "C:\\Users\\ACER\\.panproxyscanner\\settings.json",
     "auto_running": true,
     "api_token_required": false,
     "sources": 55

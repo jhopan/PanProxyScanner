@@ -1,4 +1,4 @@
-# AGENTS.md — Pan Proxy Scanner
+# AGENTS.md — Pan ProxyScanner
 
 Pengumpul + verifikator proxy publik berbahasa Go (100% Go, tanpa CGO): server web + API,
 SQLite pure-Go, 55 sumber daftar proxy, dan sinkronisasi ke Supabase untuk panel CFVPN Hub.
@@ -17,10 +17,10 @@ SQLite pure-Go, 55 sumber daftar proxy, dan sinkronisasi ke Supabase untuk panel
    gofmt -l .            # harus kosong
    go vet ./...          # harus bersih
    go test ./... -count=1
-   go build -o pan-proxy-scanner.exe .
+   go build -o panproxyscanner.exe .
    ```
    Untuk perubahan perilaku jaringan, uji nyata dulu (lihat "Uji manual").
-4. **Jangan commit berkas runtime**: `.env`, `proxies.db*`, `pan-proxy-scanner.exe`, `dist/`
+4. **Jangan commit berkas runtime**: `.env`, `proxies.db*`, `panproxyscanner.exe`, `dist/`
    (sudah ada di `.gitignore`). Jangan tambahkan UUID/kredensial ke berkas yang di-track.
 5. **Perubahan yang mengubah nama kolom/tabel Supabase** wajib disertai berkas `.sql`
    (contoh: `docs/supabase-policies.sql`) — dijalankan oleh manusia di Supabase SQL Editor.
@@ -36,7 +36,7 @@ SQLite pure-Go, 55 sumber daftar proxy, dan sinkronisasi ke Supabase untuk panel
 | `internal/sources/` | katalog 55 sumber + parser generik + kode negara |
 | `internal/supabase/` | klien REST PostgREST (push/pull-verify/prune) |
 | `internal/api/` | server HTTP + UI (HTML/JS di `internal/api/web/`, di-embed) |
-| `internal/settings/` | pengaturan JSON (`~/.pan-proxy-scanner/settings.json`) |
+| `internal/settings/` | pengaturan JSON (`~/.panproxyscanner/settings.json`) |
 | `internal/auth/`, `internal/envfile/` | sesi login + pembaca `.env` |
 | `android/` | aplikasi Android (WebView) yang di-build jadi APK di rilis |
 | `docs/API.md` | dokumentasi endpoint |
@@ -51,7 +51,7 @@ go run . sources                     # uji katalog sumber
 go run . check -jobs 8 1.2.3.4:1080  # uji proxy (tanpa simpan)
 go run . verify -jobs 8 1.2.3.4:1080 # uji + SIMPAN verdict ke database
 go run . version
-go build -ldflags "-X main.version=v0.1.0" -o pan-proxy-scanner.exe .
+go build -ldflags "-X main.version=v0.1.0" -o panproxyscanner.exe .
 ```
 
 ## Konvensi
@@ -89,10 +89,10 @@ python ../cfvpn-hub/tests/prod-proxy-check.py <worker>.workers.dev 103.18.78.157
 git tag v0.1.1 && git push origin main --tags
 ```
 
-Workflow `release.yml` akan: menjalankan `go vet` + `go test`, membangun biner Windows/Linux
-(amd64 + arm64), membangun **APK** Android, lalu:
+Workflow `release.yml` akan: menjalankan `gofmt`/`go vet`/`go test`, membangun biner Windows
+(amd64), Linux (amd64, arm64), **macOS (amd64, arm64)**, membangun **APK** Android, lalu:
 
-- membuat rilis **`v0.1.1`** (aset: zip per-OS + `pan-proxy-scanner.apk`), dan
+- membuat rilis **`v0.1.1`** (aset: zip/tar.gz per-OS + `panproxyscanner.apk`), dan
 - memperbarui tag + rilis **`latest`** ke versi itu,
 
 sehingga tautan `.../releases/latest` selalu menunjuk ke versi terbaru. Detail pemasangan ada

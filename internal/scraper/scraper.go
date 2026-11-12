@@ -14,10 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jhopan/pan-proxy-scanner/internal/checker"
-	"github.com/jhopan/pan-proxy-scanner/internal/settings"
-	"github.com/jhopan/pan-proxy-scanner/internal/sources"
-	"github.com/jhopan/pan-proxy-scanner/internal/store"
+	"github.com/jhopan/Pan-ProxyScanner/internal/checker"
+	"github.com/jhopan/Pan-ProxyScanner/internal/settings"
+	"github.com/jhopan/Pan-ProxyScanner/internal/sources"
+	"github.com/jhopan/Pan-ProxyScanner/internal/store"
 )
 
 // deadRefreshFactor menentukan seberapa jarang baris **mati** diuji ulang dibanding baris
@@ -313,7 +313,7 @@ func fetchAll(ctx context.Context, opts Options) ([]SourceStat, map[string]struc
 			started := time.Now()
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.URL, nil)
 			if err == nil {
-				req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) pan-proxy-scanner/1.0")
+				req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) panproxyscanner/1.0")
 				var resp *http.Response
 				resp, err = client.Do(req)
 				if err == nil {

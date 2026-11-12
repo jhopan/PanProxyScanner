@@ -13,11 +13,11 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 
 /**
- * Panel Pan Proxy Scanner dalam sebuah WebView.
+ * Panel Pan ProxyScanner dalam sebuah WebView.
  *
  * Alamat panel disimpan di SharedPreferences supaya tidak perlu diketik ulang: isi dengan
  * alamat LAN mesin yang menjalankan scanner, mis. http://192.168.1.10:8787 (jalankan
- * `pan-proxy-scanner.exe serve`; halaman utama menampilkan daftar alamat LAN yang bisa dipakai).
+ * `panproxyscanner.exe serve`; halaman utama menampilkan daftar alamat LAN yang bisa dipakai).
  */
 public class MainActivity extends Activity {
 
@@ -29,7 +29,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        prefs = getSharedPreferences("pan-proxy-scanner", MODE_PRIVATE);
+        prefs = getSharedPreferences("panproxyscanner", MODE_PRIVATE);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);

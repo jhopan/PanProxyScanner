@@ -1,7 +1,10 @@
 # berkas lokal
 .env
-pan-proxy-scanner.exe
-pan-proxy-scanner
+panproxyscanner.exe
+panproxyscanner
+*.exe
+*.exe~
+*~
 proxies.db
 proxies.db-shm
 proxies.db-wal
@@ -10,3 +13,7 @@ proxies.db-wal
 
 # hasil build
 /dist/
+/android/build/
+/android/app/build/
+/android/.gradle/
+/android/local.properties

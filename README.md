@@ -1,4 +1,4 @@
-# Pan Proxy Scanner
+# Pan ProxyScanner
 
 Pengumpul + verifikator proxy publik berbahasa Go, dengan **website** dan **API HTTP**.
 Dirancang untuk memasok proxy yang bisa dipakai tunnel **VLESS** (handler TCP lewat SOCKS5
@@ -9,13 +9,19 @@ sungguhan sampai ada respons HTTP dari target.
 
 Cukup satu tautan yang selalu menunjuk versi terbaru:
 
-**https://github.com/jhopan/Pan-Proxy-Scanner/releases/latest**
+**https://github.com/jhopan/Pan-ProxyScanner/releases/latest**
 
 | Perangkat | Berkas | Cara pakai |
 |---|---|---|
-| Windows 64-bit | `pan-proxy-scanner-<versi>-windows-amd64.zip` | ekstrak, jalankan `pan-proxy-scanner.exe serve`, buka `http://localhost:8787` |
-| Linux 64-bit ARM/AMD | `pan-proxy-scanner-<versi>-linux-<arch>.tar.gz` | `tar xzf …`, `chmod +x pan-proxy-scanner`, `./pan-proxy-scanner serve` |
-| Android | `pan-proxy-scanner.apk` | pasang (izinkan "instal dari sumber tidak dikenal"), lalu isi alamat panel, mis. `http://192.168.1.10:8787` |
+| Windows 64-bit | `panproxyscanner-<versi>-windows-amd64.zip` | ekstrak, jalankan `panproxyscanner.exe serve`, buka `http://localhost:8787` |
+| macOS (Apple Silicon) | `panproxyscanner-<versi>-macos-arm64.tar.gz` | `tar xzf …`, `chmod +x panproxyscanner`, `./panproxyscanner serve` |
+| macOS (Intel) | `panproxyscanner-<versi>-macos-amd64.tar.gz` | idem (build Intel) |
+| Linux (amd64/arm64) | `panproxyscanner-<versi>-linux-<arch>.tar.gz` | `tar xzf …`, `chmod +x panproxyscanner`, `./panproxyscanner serve` |
+| Android | `panproxyscanner.apk` | pasang (izinkan "instal dari sumber tidak dikenal"), lalu isi alamat panel, mis. `http://192.168.1.10:8787` |
+
+> macOS: rilis belum ditandatangani/notarized Apple, jadi saat pertama dijalankan bisa muncul
+> peringatan Gatekeeper — klik kanan → **Open**, atau
+> `xattr -dr com.apple.quarantine panproxyscanner`.
 
 Setiap rilis tersedia dalam dua bentuk: rilis berversi (mis.
 `/releases/tag/v0.1.0`, arsip permanen) dan rilis **`latest`** yang selalu diperbarui ke
@@ -23,8 +29,10 @@ versi terbaru dengan aset yang sama. Jadi untuk memperbarui, cukup unduh ulang d
 `/releases/latest`.
 
 Android: APK-nya adalah panel dalam WebView (varian *debug* yang sudah ditandatangani agar
-bisa langsung dipasang). Arahkan ke alamat LAN mesin yang menjalankan scanner — halaman
-dashboard menampilkan daftar URL LAN yang bisa dipakai dari HP.
+bisa langsung dipasang). **APK ini tidak membawa biner Go di dalamnya** — scanner tetap
+berjalan di komputer (Windows/macOS/Linux) dan APK hanya menjadi tampilan panelnya lewat
+jaringan lokal. Arahkan ke alamat LAN mesin yang menjalankan scanner; dashboard menampilkan
+daftar URL LAN yang bisa dipakai dari HP.
 
 ## Kebutuhan (kalau membangun sendiri)
 
@@ -40,7 +48,7 @@ go run . scrape                      # satu siklus, progres di terminal, lalu ke
 go run . sources                     # uji semua sumber: status, jumlah proxy, kecepatan
 go run . check 1.2.3.4:1080 5.6.7.8:4145   # uji proxy langsung (SOCKS5/HTTP + TLS 443)
 go run . verify -jobs 8 1.2.3.4:1080 5.6.7.8:4145   # uji + SIMPAN verdict ke database
-go build -o pan-proxy-scanner.exe .     # bikin binary
+go build -o panproxyscanner.exe .     # bikin binary
 ```
 
 `check` hanya menampilkan hasil; **`verify` menuliskannya ke database** (RecordAlive/RecordDead,
@@ -66,7 +74,7 @@ dari perangkat lain. Panel memakai **login** (bawaan `admin` / `admin`; ganti di
 
 Siklus otomatis, jadwal, kandidat per siklus, jumlah verifikasi paralel, filter negara,
 housekeeping, akun admin, token API, dan public URL semuanya bisa diubah dari panel
-(tersimpan di `~/.pan-proxy-scanner/settings.json`), tanpa restart proses.
+(tersimpan di `~/.panproxyscanner/settings.json`), tanpa restart proses.
 
 Referensi lengkap API: [`docs/API.md`](docs/API.md).
 
@@ -80,9 +88,9 @@ cloudflared tunnel --url http://localhost:8787
 
 # named tunnel (domain sendiri)
 cloudflared tunnel login
-cloudflared tunnel create pan-proxy-scanner
-cloudflared tunnel route dns pan-proxy-scanner scraping.domainmu.com
-cloudflared tunnel run --url http://localhost:8787 pan-proxy-scanner
+cloudflared tunnel create panproxyscanner
+cloudflared tunnel route dns panproxyscanner scraping.domainmu.com
+cloudflared tunnel run --url http://localhost:8787 panproxyscanner
 ```
 
 Perintahnya juga ditampilkan lengkap di halaman **Tunnel CF**, beserta status apakah
@@ -99,7 +107,7 @@ Opsi penting:
 |---|---|---|
 | `-addr` | alamat listen website + API (`0.0.0.0` = bisa diakses LAN) | `0.0.0.0:8787` |
 | `-db` | berkas SQLite | `proxies.db` |
-| `-config` | lokasi `settings.json` | `~/.pan-proxy-scanner/settings.json` |
+| `-config` | lokasi `settings.json` | `~/.panproxyscanner/settings.json` |
 | `-jobs` / `-cap` / `-min-sources` / `-offset` | nilai awal kalau `settings.json` belum ada | `150` / `20000` / `0` / `0` |
 | `-interval` | nilai awal siklus otomatis (0 = ikut settings) | `0` |
 | `-fresh` | jendela kesegaran statistik/API | `6h` |
@@ -193,7 +201,7 @@ Pembagian peran (satu penilai, banyak pengawas):
 
 | Komponen | Peran | Yang TIDAK boleh dilakukan |
 |---|---|---|
-| `pan-proxy-scanner` (aplikasi ini) | satu-satunya yang memverifikasi mendalam dan menaikkan `is_active` | — |
+| `panproxyscanner` (aplikasi ini) | satu-satunya yang memverifikasi mendalam dan menaikkan `is_active` | — |
 | `cron-worker` panel | mengawasi baris yang sudah aktif, mematikan yang terbukti mati | menyalakan baris (cek dangkal bisa lolos di proxy non-TLS) |
 | panel CFVPN Hub | membaca daftar, tidak memverifikasi | menandai `is_active` |
 
@@ -413,4 +421,4 @@ GitHub Actions (`.github/workflows/release.yml`) akan:
 4. membuat rilis **`v0.1.1`** berisi semua aset itu, lalu memindahkan tag **`latest`** dan
    memperbarui rilis **`latest`** dengan aset yang sama.
 
-Cek versi biner: `pan-proxy-scanner version` (mis. `pan-proxy-scanner v0.1.1`).
+Cek versi biner: `panproxyscanner version` (mis. `panproxyscanner v0.1.1`).

@@ -3,7 +3,7 @@ package api
 import (
 	"testing"
 
-	"github.com/jhopan/pan-proxy-scanner/internal/settings"
+	"github.com/jhopan/Pan-ProxyScanner/internal/settings"
 )
 
 // exitKey dipakai untuk dedup alamat keluar di pool: IPv4 dinormalkan per /24 supaya

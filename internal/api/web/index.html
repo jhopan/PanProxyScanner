@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pan Proxy Scanner — panel</title>
+<title>Pan ProxyScanner — panel</title>
 <style>
   :root {
     --bg:#07111f; --panel:#0d1a2b; --panel2:#101f33; --border:#1e3350; --fg:#e8eef7;
@@ -198,7 +198,7 @@
             <label>Sandi baru (kosongkan bila tidak diganti)<input id="sAdminPass" type="password" size="20" placeholder="••••••"></label>
             <label>Token API (klien mesin)<input id="sToken" placeholder="kosong = tanpa token" size="20"></label>
             <label>Public URL (hasil tunnel)<input id="sPublicUrl" placeholder="https://scraping.domain.com" size="28"></label>
-            <label>Nama tunnel CF<input id="sTunnelName" placeholder="pan-proxy-scanner" size="18"></label>
+            <label>Nama tunnel CF<input id="sTunnelName" placeholder="panproxyscanner" size="18"></label>
             <label>Domain tunnel CF<input id="sTunnelDomain" placeholder="scraping.domainmu.com" size="26"></label>
             <button class="primary" id="btnSaveAccount">Simpan akun &amp; API</button>
           </div>
@@ -324,7 +324,7 @@ const num = (id) => { const v = $(id).value.trim(); return v === "" ? "" : Numbe
 let me = null;
 
 function toast(msg) { const el = $("toast"); el.textContent = msg; el.classList.add("show"); setTimeout(() => el.classList.remove("show"), 2600); }
-function token() { return localStorage.getItem("pan-proxy-scanner-token") || ""; }
+function token() { return localStorage.getItem("panproxyscanner-token") || ""; }
 
 async function api(path, init) {
   const url = new URL(path, location.origin);
@@ -486,7 +486,7 @@ function fillSettings(s) {
   $("sRefreshAfter").value = s.refresh_after_minutes; $("sFresh").value = s.fresh_minutes;
   $("sPurge").value = s.purge_dead_hours; $("sAdminUser").value = s.admin_user || "admin";
   $("sAdminPass").value = ""; $("sToken").value = s.token || ""; $("sPublicUrl").value = s.public_url || "";
-  $("sTunnelName").value = s.tunnel_name || "pan-proxy-scanner"; $("sTunnelDomain").value = s.tunnel_domain || "";
+  $("sTunnelName").value = s.tunnel_name || "panproxyscanner"; $("sTunnelDomain").value = s.tunnel_domain || "";
 }
 
 async function loadSettings() {
@@ -515,7 +515,7 @@ async function loadTunnel() {
     <div>Panel listen di <code>${listen.addr || "-"}</code> (${listen.note || "-"}) — port <b>${listen.port || "-"}</b>, host <code>${listen.host || "-"}</code></div>
     <div style="margin-top:4px">URL lokal: ${(data.local_urls || []).map((u) => `<code>${u}</code>`).join(" ")}</div>
     <div>Public URL tersimpan: ${data.public_url ? `<code>${data.public_url}</code>` : '<span class="muted">belum diisi (menu Scheduler → Akun &amp; API)</span>'}</div>
-    <div>Domain tunnel: <code>${data.tunnel_domain || "(belum diisi)"}</code> · nama tunnel: <code>${data.tunnel_name || "pan-proxy-scanner"}</code></div>
+    <div>Domain tunnel: <code>${data.tunnel_domain || "(belum diisi)"}</code> · nama tunnel: <code>${data.tunnel_name || "panproxyscanner"}</code></div>
     <div class="muted" style="margin-top:4px">Konfigurasi dari <code>${data.env_file || ".env"}</code> dan <code>${data.settings_file || "-"}</code></div>
 
     <h2 style="margin-top:16px">1. Quick tunnel (tanpa domain)</h2>

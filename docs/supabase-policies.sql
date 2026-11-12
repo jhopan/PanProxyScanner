@@ -1,4 +1,4 @@
--- Skema + policy untuk tabel proxy_pool (dipakai `pan-proxy-scanner` dan panel CFVPN Hub)
+-- Skema + policy untuk tabel proxy_pool (dipakai `panproxyscanner` dan panel CFVPN Hub)
 --
 -- CATATAN (12 Nov 2026): project panel sudah pindah ke project baru `lumbbmhhmkcnxunuryjr`
 -- (akun adelia140845@gmail.com, org "Adelia Hub") dan project itu **sudah lengkap** dari
@@ -8,7 +8,7 @@
 -- Jalankan SEKALI di Supabase → SQL Editor. Idempoten: aman diulang.
 --
 -- Isi:
---   1. Kolom bukti verifikasi (diisi aplikasi `pan-proxy-scanner`, bukan oleh panel):
+--   1. Kolom bukti verifikasi (diisi aplikasi `panproxyscanner`, bukan oleh panel):
 --        tls_ok   = terbukti bisa tunnel TLS 443 (syarat VLESS/WebSocket ke worker)
 --        alt_ok   = terbukti bisa tunnel port non-standar (8443/2053)
 --        exit_ip  = alamat keluar sebenarnya (dibaca dari trace Cloudflare)
@@ -64,6 +64,6 @@ create policy proxy_pool_delete_anon
   using (true);
 
 -- Setelah dijalankan:
---   1. POST /api/supabase/push?limit=500   (di pan-proxy-scanner) → mulai mengisi tls_ok/alt_ok/exit_ip
+--   1. POST /api/supabase/push?limit=500   (di panproxyscanner) → mulai mengisi tls_ok/alt_ok/exit_ip
 --   2. POST /api/supabase/prune?days=1     → baru benar-benar menghapus baris mati
 --   3. Panel CFVPN Hub sebaiknya membaca: is_active = true AND tls_ok = true

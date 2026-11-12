@@ -15,11 +15,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jhopan/pan-proxy-scanner/internal/auth"
-	"github.com/jhopan/pan-proxy-scanner/internal/scraper"
-	"github.com/jhopan/pan-proxy-scanner/internal/settings"
-	"github.com/jhopan/pan-proxy-scanner/internal/store"
-	"github.com/jhopan/pan-proxy-scanner/internal/supabase"
+	"github.com/jhopan/Pan-ProxyScanner/internal/auth"
+	"github.com/jhopan/Pan-ProxyScanner/internal/scraper"
+	"github.com/jhopan/Pan-ProxyScanner/internal/settings"
+	"github.com/jhopan/Pan-ProxyScanner/internal/store"
+	"github.com/jhopan/Pan-ProxyScanner/internal/supabase"
 )
 
 //go:embed web/index.html
@@ -1619,7 +1619,7 @@ func (s *Server) handleClash(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var b strings.Builder
-	b.WriteString("# dibangkitkan oleh pan-proxy-scanner\n")
+	b.WriteString("# dibangkitkan oleh panproxyscanner\n")
 	fmt.Fprintf(&b, "# worker: %s  port: %d  jumlah proxy: %d\n", host, port, len(list))
 	b.WriteString("proxies:\n")
 	names := make([]string, 0, len(list))

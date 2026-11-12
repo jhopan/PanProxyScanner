@@ -1,4 +1,4 @@
-// Pan Proxy Scanner — pengumpul + verifikator proxy publik, dengan website dan API.
+// Pan ProxyScanner — pengumpul + verifikator proxy publik, dengan website dan API.
 //
 //	go run . serve            # jalankan website + API (default 0.0.0.0:8787)
 //	go run . scrape           # satu siklus scraping, lalu keluar
@@ -26,19 +26,19 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jhopan/pan-proxy-scanner/internal/api"
-	"github.com/jhopan/pan-proxy-scanner/internal/checker"
-	"github.com/jhopan/pan-proxy-scanner/internal/envfile"
-	"github.com/jhopan/pan-proxy-scanner/internal/scraper"
-	"github.com/jhopan/pan-proxy-scanner/internal/settings"
-	"github.com/jhopan/pan-proxy-scanner/internal/sources"
-	"github.com/jhopan/pan-proxy-scanner/internal/store"
+	"github.com/jhopan/Pan-ProxyScanner/internal/api"
+	"github.com/jhopan/Pan-ProxyScanner/internal/checker"
+	"github.com/jhopan/Pan-ProxyScanner/internal/envfile"
+	"github.com/jhopan/Pan-ProxyScanner/internal/scraper"
+	"github.com/jhopan/Pan-ProxyScanner/internal/settings"
+	"github.com/jhopan/Pan-ProxyScanner/internal/sources"
+	"github.com/jhopan/Pan-ProxyScanner/internal/store"
 )
 
 var (
 	flagAddr         = flag.String("addr", "0.0.0.0:8787", "alamat listen website + API (0.0.0.0 = bisa diakses dari LAN)")
 	flagDB           = flag.String("db", "proxies.db", "path database SQLite")
-	flagConfig       = flag.String("config", "", "path settings.json (default ~/.pan-proxy-scanner/settings.json)")
+	flagConfig       = flag.String("config", "", "path settings.json (default ~/.panproxyscanner/settings.json)")
 	flagJobs         = flag.Int("jobs", 150, "jumlah verifikasi paralel (scrape/check/verify)")
 	flagCap          = flag.Int("cap", 20000, "batas kandidat baru per siklus")
 	flagOffset       = flag.Int("offset", 0, "geser slice kandidat (rotasi antar siklus)")
@@ -155,7 +155,7 @@ func main() {
 
 	switch command {
 	case "version":
-		fmt.Println("pan-proxy-scanner " + version)
+		fmt.Println("panproxyscanner " + version)
 	case "sources":
 		if err := runSources(ctx); err != nil {
 			log.Fatalf("sources: %v", err)
@@ -298,7 +298,7 @@ func runServe(ctx context.Context) error {
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "localhost"
 	}
-	log.Printf("pan-proxy-scanner %s — website + API: http://%s (bind %s)", version, net.JoinHostPort(host, port), effAddr)
+	log.Printf("panproxyscanner %s — website + API: http://%s (bind %s)", version, net.JoinHostPort(host, port), effAddr)
 	log.Printf("database: %s | pengaturan: %s | sumber: %d", effDB, cfgPath, countSources(st))
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err

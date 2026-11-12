@@ -1,4 +1,4 @@
-module github.com/jhopan/pan-proxy-scanner
+module github.com/jhopan/Pan-ProxyScanner
 
 go 1.26.0
 

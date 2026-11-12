@@ -42,6 +42,8 @@ jobs:
           - { goos: windows, goarch: amd64, ext: ".exe", tag: windows-amd64 }
           - { goos: linux, goarch: amd64, ext: "", tag: linux-amd64 }
           - { goos: linux, goarch: arm64, ext: "", tag: linux-arm64 }
+          - { goos: darwin, goarch: amd64, ext: "", tag: macos-amd64 }
+          - { goos: darwin, goarch: arm64, ext: "", tag: macos-arm64 }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -57,20 +59,20 @@ jobs:
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME}"
           mkdir -p dist
-          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/pan-proxy-scanner${{ matrix.ext }}" .
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/panproxyscanner${{ matrix.ext }}" .
           cp README.md dist/README.md
           cp AGENTS.md dist/AGENTS.md
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            (cd dist && zip -r "../pan-proxy-scanner-${VERSION}-${{ matrix.tag }}.zip" .)
+            (cd dist && zip -r "../panproxyscanner-${VERSION}-${{ matrix.tag }}.zip" .)
           else
-            (cd dist && tar czf "../pan-proxy-scanner-${VERSION}-${{ matrix.tag }}.tar.gz" .)
+            (cd dist && tar czf "../panproxyscanner-${VERSION}-${{ matrix.tag }}.tar.gz" .)
           fi
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.tag }}
           path: |
-            pan-proxy-scanner-*.zip
-            pan-proxy-scanner-*.tar.gz
+            panproxyscanner-*.zip
+            panproxyscanner-*.tar.gz
           if-no-files-found: error
 
   apk:
@@ -98,11 +100,11 @@ jobs:
         working-directory: android
         run: gradle --no-daemon assembleDebug
       - name: Rename APK
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk pan-proxy-scanner.apk
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk panproxyscanner.apk
       - uses: actions/upload-artifact@v4
         with:
           name: apk
-          path: pan-proxy-scanner.apk
+          path: panproxyscanner.apk
           if-no-files-found: error
 
   release:
