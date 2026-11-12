@@ -5,7 +5,54 @@ Dirancang untuk memasok proxy yang bisa dipakai tunnel **VLESS** (handler TCP le
 atau HTTP CONNECT), jadi verifikasinya bukan sekadar "port terbuka" tetapi handshake
 sungguhan sampai ada respons HTTP dari target.
 
-## Instal (unduh versi rilis)
+## Instal cepat (installer otomatis)
+
+Installer mendeteksi OS/arsitektur (Windows, macOS, Linux, Termux), mengunduh **rilis
+terbaru**, menanyakan **port** dan apakah dijadikan **layanan otomatis**, lalu menjalankannya.
+
+| Lingkungan | Perintah |
+|---|---|
+| Linux / macOS / Termux | `curl -fsSL https://raw.githubusercontent.com/jhopan/PanProxyScanner/main/install.sh \| sh` |
+| Windows | unduh [`install.bat`](https://raw.githubusercontent.com/jhopan/PanProxyScanner/main/install.bat) lalu jalankan (klik dua kali) |
+
+Yang dilakukan installer:
+
+1. deteksi sistem: Windows (`install.bat`), Linux, macOS, atau Termux (Android);
+2. unduh `panproxyscanner-<os>-<arch>.(zip|tar.gz)` dari `/releases/latest` (nama berkas
+   stabil, jadi selalu versi terbaru tanpa perlu tahu nomor versinya);
+3. pasang ke `~/.local/share/panproxyscanner` (Linux/macOS/Termux) atau
+   `%LOCALAPPDATA%\PanProxyScanner` (Windows), plus symlink `panproxyscanner`;
+4. tanya **port** (default `8787`) dan **layanan otomatis**:
+   - Linux → unit `systemd` (`panproxyscanner.service`, `enable --now`);
+   - macOS → LaunchAgent `~/Library/LaunchAgents/id.panproxyscanner.plist` (RunAtLoad + KeepAlive);
+   - Windows → Scheduled Task `PanProxyScanner` (jalan saat login; biner Go bukan Windows
+     Service asli, jadi Task Scheduler yang andal);
+   - Termux → blok autostart di `~/.bashrc` + `termux-wake-lock`;
+5. jalankan sekarang (opsional) dan cek `/api/health`.
+
+Non-interaktif (otomatisasi):
+
+```bash
+PORT=8787 SERVICE=yes RUN_NOW=yes NONINTERACTIVE=1 sh install.sh
+set PORT=8787 && set SERVICE=yes && set RUN_NOW=yes && set NONINTERACTIVE=1 && install.bat
+```
+
+Melepas pemasangan:
+
+```bash
+# Linux
+sudo systemctl disable --now panproxyscanner && sudo rm /etc/systemd/system/panproxyscanner.service
+rm -rf ~/.local/share/panproxyscanner ~/.panproxyscanner ~/.local/bin/panproxyscanner
+# macOS
+launchctl unload ~/Library/LaunchAgents/id.panproxyscanner.plist
+rm -f ~/Library/LaunchAgents/id.panproxyscanner.plist
+# Windows
+schtasks /Delete /TN PanProxyScanner /F
+rmdir /s /q "%LOCALAPPDATA%\PanProxyScanner"
+# Termux: hapus blok "PANPROXYSCANNER AUTOSTART" di ~/.bashrc
+```
+
+## Instal manual (unduh versi rilis)
 
 Cukup satu tautan yang selalu menunjuk versi terbaru:
 

@@ -82,6 +82,19 @@ curl -s http://127.0.0.1:8787/api/health                       # {"ok":true,...}
 python ../cfvpn-hub/tests/prod-proxy-check.py <worker>.workers.dev 103.18.78.157:1080
 ```
 
+## Installer
+
+`install.sh` (Linux/macOS/Termux) dan `install.bat` (Windows) mengunduh dari
+`https://github.com/jhopan/PanProxyScanner/releases/latest/download/<nama-stabil>`.
+Workflow rilis **wajib** tetap menerbitkan nama stabil itu di rilis `latest`
+(`panproxyscanner-linux-amd64.tar.gz`, `-linux-arm64`, `-macos-amd64`, `-macos-arm64`,
+`-windows-amd64.zip`, `panproxyscanner.apk`) — installer tidak boleh bergantung pada nomor
+versi. Kalau nama aset diubah, perbarui juga `install.sh`/`install.bat` dan README.
+
+Uji installer sebelum rilis: `sh -n install.sh`, lalu jalankan non-interaktif
+(`PORT=8898 SERVICE=no RUN_NOW=yes NONINTERACTIVE=1 sh install.sh`) dan pastikan
+`/api/health` menjawab `{"ok":true,...}`.
+
 ## Rilis (GitHub Actions)
 
 ```bash
