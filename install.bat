@@ -53,8 +53,8 @@ if errorlevel 1 (
 netstat -ano | findstr /R /C:":%PORT% .*LISTENING" >nul 2>&1
 if not errorlevel 1 (
   echo   PERINGATAN: port %PORT% sedang dipakai proses lain.
-  if /I "%NONINTERACTIVE%"=="1" (
-    echo   (mode non-interaktif: tetap dilanjutkan, tapi scanner kemungkinan gagal bind)
+  if /I "!NONINTERACTIVE!"=="1" (
+    echo   (mode non-interaktif: dilanjutkan dengan port yang sama)
   ) else (
     set /p "PORT=Masukkan port lain [8790]: "
     if "!PORT!"=="" set "PORT=8790"
