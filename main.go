@@ -121,7 +121,9 @@ func applyEnvToSettings(cfg *settings.Settings) {
 }
 
 // version diisi saat build rilis:
-//   go build -ldflags "-X main.version=v1.2.3" .
+//
+//	go build -ldflags "-X main.version=v1.2.3" .
+//
 // Dipakai oleh subcommand `version` dan dicatat di log saat serve.
 var version = "dev"
 
