@@ -70,7 +70,9 @@ port_in_use() {
 }
 
 detect_os() {
-  if [ -n "${TERMUX_VERSION:-}" ] || [ -n "${PREFIX:-}" ] && [ -d "/data/data/com.termux/files/usr" ]; then
+  # Termux: env khas Termux atau struktur folder paketnya. Perhatikan: `A || B && C` di POSIX
+  # shell berarti `(A || B) && C`, jadi tiap sinyal harus dipisah sendiri-sendiri.
+  if [ -n "${TERMUX_VERSION:-}" ] || [ -n "${TERMUX_PREFIX:-}" ] || [ -d "/data/data/com.termux/files/usr" ]; then
     echo "termux"; return 0
   fi
   case "$(uname -s 2>/dev/null || echo unknown)" in
