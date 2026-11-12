@@ -16,7 +16,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul 2>&1
 
 set "REPO=jhopan/PanProxyScanner"
-set "STABLE_URL=https://github.com/%REPO%/releases/latest/download/panproxyscanner-windows-amd64.zip"
+set "STABLE_URL=https://github.com/%REPO%/releases/download/latest/panproxyscanner-windows-amd64.zip"
 set "API_URL=https://api.github.com/repos/%REPO%/releases/latest"
 set "INSTALL_DIR=%LOCALAPPDATA%\PanProxyScanner"
 set "EXE=%INSTALL_DIR%\panproxyscanner.exe"
@@ -114,7 +114,7 @@ rem Catatan: biner Go ini bukan Windows Service asli (tidak bicara SCM), jadi di
 rem Task Scheduler "saat login" yang lebih andal untuk aplikasi seperti ini.
 if /I "%SERVICE%"=="yes" (
   echo   mendaftarkan Task Scheduler "%TASK_NAME%" (jalan otomatis saat login)
-  schtasks /Create /TN "%TASK_NAME%" /TR "\"%EXE%\" serve -addr 0.0.0.0:%PORT%" /SC ONLOGON /F >nul 2>&1
+  schtasks /Create /TN "%TASK_NAME%" /TR "cmd /c cd /d \"%INSTALL_DIR%\" && \"%EXE%\" serve -addr 0.0.0.0:%PORT%" /SC ONLOGON /F >nul 2>&1
   if errorlevel 1 (
     echo   PERINGATAN: gagal mendaftarkan task. Jalankan installer ini sebagai Administrator.
   ) else (
@@ -129,9 +129,9 @@ if /I "%SERVICE%"=="yes" (
 
 rem ---------------------------------------------------------------- jalankan --
 if /I "%RUN_NOW%"=="yes" (
-  start "" /min "%EXE%" serve -addr 0.0.0.0:%PORT%
+  start "" /min /D "%INSTALL_DIR%" "%EXE%" serve -addr 0.0.0.0:%PORT%
   echo   menjalankan scanner di port %PORT% ...
-  timeout /t 3 /nobreak >nul
+  timeout /t 4 /nobreak >nul
   powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "try { $r = Invoke-WebRequest -Uri 'http://127.0.0.1:%PORT%/api/health' -UseBasicParsing -TimeoutSec 5; Write-Host ('  health: ' + $r.StatusCode + ' ' + $r.Content) } catch { Write-Host '  PERINGATAN: health check gagal, cek firewall/antivirus' }"
 )

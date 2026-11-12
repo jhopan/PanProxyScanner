@@ -78,17 +78,37 @@ func initEnv() {
 	envValues, _ = envfile.Load(*flagEnv)
 	effDB = envfile.Get(envValues, "PS_DB", *flagDB)
 	effConfig = envfile.Get(envValues, "PS_CONFIG", configPathFromFlag())
+	effAddr = resolveAddr(*flagAddr, envValues)
+}
 
-	host := envfile.Get(envValues, "PS_HOST", "")
-	if host == "" {
-		if envfile.GetBool(envValues, "PS_BIND_LAN", true) {
+// resolveAddr menghitung alamat listen. Urutannya: `PS_ADDR` di .env (menang total), lalu
+// `PS_HOST`/`PS_PORT`/`PS_BIND_LAN` dari .env, dan kalau .env tidak menyebut apa-apa dipakai
+// nilai flag `-addr`. Tanpa ini flag `-addr` tidak berpengaruh sama sekali (port selalu 8787).
+func resolveAddr(flagAddr string, env map[string]string) string {
+	if v := envfile.Get(env, "PS_ADDR", ""); v != "" {
+		return v
+	}
+	flagHost, flagPortStr, err := net.SplitHostPort(flagAddr)
+	if err != nil {
+		flagHost, flagPortStr = "0.0.0.0", "8787"
+	}
+	flagPort, convErr := strconv.Atoi(flagPortStr)
+	if convErr != nil {
+		flagPort = 8787
+	}
+
+	host := envfile.Get(env, "PS_HOST", flagHost)
+	// PS_BIND_LAN hanya menimpa host kalau .env benar-benar menyetelnya; default lamanya
+	// (true = 0.0.0.0) tetap berlaku karena flag default juga 0.0.0.0.
+	if raw, present := env["PS_BIND_LAN"]; present {
+		if envfile.GetBool(map[string]string{"PS_BIND_LAN": raw}, "PS_BIND_LAN", true) {
 			host = "0.0.0.0"
 		} else {
 			host = "127.0.0.1"
 		}
 	}
-	port := envfile.GetInt(envValues, "PS_PORT", 8787)
-	effAddr = envfile.Get(envValues, "PS_ADDR", net.JoinHostPort(host, strconv.Itoa(port)))
+	port := envfile.GetInt(env, "PS_PORT", flagPort)
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 // applyEnvToSettings menimpa pengaturan tersimpan dengan nilai dari .env (kalau diisi).

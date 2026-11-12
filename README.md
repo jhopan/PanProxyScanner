@@ -18,8 +18,9 @@ terbaru**, menanyakan **port** dan apakah dijadikan **layanan otomatis**, lalu m
 Yang dilakukan installer:
 
 1. deteksi sistem: Windows (`install.bat`), Linux, macOS, atau Termux (Android);
-2. unduh `panproxyscanner-<os>-<arch>.(zip|tar.gz)` dari `/releases/latest` (nama berkas
-   stabil, jadi selalu versi terbaru tanpa perlu tahu nomor versinya);
+2. unduh `panproxyscanner-<os>-<arch>.(zip|tar.gz)` dari rilis **`latest`**
+   (`https://github.com/jhopan/PanProxyScanner/releases/download/latest/<berkas>`); nama
+   berkasnya stabil, jadi installer tidak perlu tahu nomor versinya;
 3. pasang ke `~/.local/share/panproxyscanner` (Linux/macOS/Termux) atau
    `%LOCALAPPDATA%\PanProxyScanner` (Windows), plus symlink `panproxyscanner`;
 4. tanya **port** (default `8787`) dan **layanan otomatis**:

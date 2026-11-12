@@ -11,7 +11,7 @@
 set -eu
 
 REPO="jhopan/PanProxyScanner"
-STABLE_BASE="https://github.com/${REPO}/releases/latest/download"
+STABLE_BASE="https://github.com/${REPO}/releases/download/latest"
 API_LATEST="https://api.github.com/repos/${REPO}/releases/latest"
 SERVICE_NAME="panproxyscanner"
 
@@ -283,11 +283,11 @@ if [ "$RUN_NOW" = "yes" ]; then
     info "scanner sudah berjalan di port $PORT"
   else
     if have setsid; then
-      setsid "$BIN" serve -addr "0.0.0.0:$PORT" >"$INSTALL_DIR/${SERVICE_NAME}.out.log" 2>&1 &
+      ( cd "$INSTALL_DIR" && setsid "$BIN" serve -addr "0.0.0.0:$PORT" >"$INSTALL_DIR/${SERVICE_NAME}.out.log" 2>&1 & )
     else
-      nohup "$BIN" serve -addr "0.0.0.0:$PORT" >"$INSTALL_DIR/${SERVICE_NAME}.out.log" 2>&1 &
+      ( cd "$INSTALL_DIR" && nohup "$BIN" serve -addr "0.0.0.0:$PORT" >"$INSTALL_DIR/${SERVICE_NAME}.out.log" 2>&1 & )
     fi
-    sleep 2
+    sleep 3
     if have curl && curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
       info "scanner berjalan (log: $INSTALL_DIR/${SERVICE_NAME}.out.log)"
     else

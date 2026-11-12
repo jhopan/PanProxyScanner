@@ -85,7 +85,9 @@ python ../cfvpn-hub/tests/prod-proxy-check.py <worker>.workers.dev 103.18.78.157
 ## Installer
 
 `install.sh` (Linux/macOS/Termux) dan `install.bat` (Windows) mengunduh dari
-`https://github.com/jhopan/PanProxyScanner/releases/latest/download/<nama-stabil>`.
+`https://github.com/jhopan/PanProxyScanner/releases/download/latest/<nama-stabil>`
+(bentuk `…/releases/download/latest/…`; shortcut `…/releases/latest/download/…` terbukti 404
+untuk arsip besar).
 Workflow rilis **wajib** tetap menerbitkan nama stabil itu di rilis `latest`
 (`panproxyscanner-linux-amd64.tar.gz`, `-linux-arm64`, `-macos-amd64`, `-macos-arm64`,
 `-windows-amd64.zip`, `panproxyscanner.apk`) — installer tidak boleh bergantung pada nomor
