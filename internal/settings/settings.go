@@ -90,7 +90,7 @@ func Default() Settings {
 		PipelinePushLimit:   1000,
 		ProbeTLS:            true,
 		ProbeAlt:            true,
-		PushRequireTLS:      true,
+		PushRequireTLS:      false, // semua proxy yang bisa dipakai dikirim; tls_ok jadi penanda kualitas
 		SupabasePruneDays:   7,
 		AutoDisableSources:  true,
 		ZeroStreakLimit:     3,

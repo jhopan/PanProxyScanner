@@ -287,6 +287,7 @@ func runServe(ctx context.Context) error {
 
 	runner := scraper.NewRunner(st)
 	sched := scraper.NewScheduler(runner, cfg)
+	sched.Store = st
 	apiServer := api.New(st, runner, sched, &cfg, cfgPath, effAddr)
 	apiServer.SetEnvPath(*flagEnv)
 	// Setiap siklus selesai: dorong hasil ke Supabase dan/atau verifikasi baris lama.

@@ -304,7 +304,7 @@ func (s *Server) handleSupabasePush(w http.ResponseWriter, r *http.Request) {
 	if edgeErr != nil {
 		edgeDead = nil // tabel tanpa kolom tunnel_ok: lanjut tanpa filter edge
 	}
-	pushed, skippedEdge, err := s.pushToSupabase(r.Context(), client, cfg, limit, edgeDead)
+	pushed, skippedEdge, err := s.pushToSupabase(r.Context(), client, cfg, limit, edgeDead, time.Time{})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -428,10 +428,12 @@ func exitKey(exitIP string) string {
 // dangkal) akan terus dipakai panel dan menghasilkan konfigurasi VLESS yang mati.
 // edgeDead: peta "ip:port" -> verdict edge terakhir. Baris yang di edge terbukti mati tidak
 // dinaikkan lagi, walau verifikasi lokal menganggapnya hidup.
-func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cfg settings.Settings, limit int, edgeDead map[string]bool) (int, int, error) {
+// since membatasi push ke baris yang dicek setelah waktu itu (push delta). Zero = semua baris
+// segar (dipakai pipeline harian supaya Supabase ikut disegarkan menyeluruh).
+func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cfg settings.Settings, limit int, edgeDead map[string]bool, since time.Time) (int, int, error) {
 	alive := true
 	fresh := pushFreshMinutes(cfg)
-	promote, err := s.store.List(store.Filter{Alive: &alive, Limit: limit, Order: "score", FreshMinutes: fresh, TLSOnly: cfg.PushRequireTLS})
+	promote, err := s.store.List(store.Filter{Alive: &alive, Limit: limit, Order: "score", FreshMinutes: fresh, TLSOnly: cfg.PushRequireTLS, Since: since})
 	if err != nil {
 		return 0, 0, err
 	}
@@ -439,7 +441,7 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 	if demoteCap < 2000 {
 		demoteCap = 2000
 	}
-	candidates, err := s.store.List(store.Filter{Alive: &alive, Limit: demoteCap, Order: "score", FreshMinutes: fresh})
+	candidates, err := s.store.List(store.Filter{Alive: &alive, Limit: demoteCap, Order: "score", FreshMinutes: fresh, Since: since})
 	if err != nil {
 		return 0, 0, err
 	}
@@ -520,6 +522,11 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 		note += ", kolom bukti belum ada di tabel → jalankan docs/supabase-policies.sql"
 	}
 	s.recordSync(note+")", err)
+	if err == nil {
+		// Penanda push terakhir: push berikutnya (jadwal 6 jam / auto-push) hanya mengirim
+		// baris yang berubah sejak titik ini.
+		_ = s.store.SetMeta("last_push_at", time.Now().UTC().Format(time.RFC3339))
+	}
 	return sent, skippedEdge, err
 }
 
@@ -717,7 +724,7 @@ func (s *Server) RunPipelineMode(testOnly bool) error {
 		if pullLimit <= 0 {
 			pullLimit = cfg.SupabasePullLimit
 		}
-		if client.Configured() && pullLimit > 0 {
+		if !testOnly && client.Configured() && pullLimit > 0 {
 			started := time.Now()
 			summary, err := s.pullVerify(ctx, client, scraper.OptionsFromSettings(cfg), pullLimit)
 			step := PipelineStep{
@@ -736,7 +743,25 @@ func (s *Server) RunPipelineMode(testOnly bool) error {
 
 		// --- langkah 2: scrape sumber lalu verifikasi ---
 		if testOnly {
-			s.addPipelineStep(PipelineStep{Name: "scrape sumber & verifikasi", OK: true, Note: "dilewati (mode tes berkala)"})
+			// Cek lokal (jadwal 6 jam): refresh baris tersimpan + pass target negara, tanpa
+			// mengambil sumber baru dan tanpa menarik ulang dari Supabase.
+			started := time.Now()
+			localOpts := scraper.OptionsFromSettings(cfg)
+			localOpts.LocalOnly = true
+			_ = s.waitForCycle(ctx, 10*time.Minute)
+			localErr := s.runner.Start(localOpts)
+			if localErr == nil {
+				localErr = s.waitForCycle(ctx, 30*time.Minute)
+			}
+			localProgress := s.runner.Progress()
+			localStep := PipelineStep{Name: "cek lokal (refresh + target negara)", OK: localErr == nil, MS: time.Since(started).Milliseconds(),
+				Counts: map[string]int{"diperiksa": localProgress.Refreshed, "hidup": localProgress.Alive}}
+			if localErr != nil {
+				localStep.Note = localErr.Error()
+			} else {
+				localStep.Note = fmt.Sprintf("%d baris diverifikasi ulang", localProgress.Refreshed)
+			}
+			s.addPipelineStep(localStep)
 		} else {
 			started := time.Now()
 			opts := scraper.OptionsFromSettings(cfg)
@@ -772,7 +797,16 @@ func (s *Server) RunPipelineMode(testOnly bool) error {
 			if edgeErr != nil {
 				edgeDead = nil
 			}
-			pushed, skippedEdge, err := s.pushToSupabase(ctx, client, cfg, cfg.PipelinePushLimit, edgeDead)
+			// Push saat cek lokal hanya mengirim yang berubah sejak push terakhir.
+			since := time.Time{}
+			if testOnly {
+				if raw, metaErr := s.store.Meta("last_push_at"); metaErr == nil && raw != "" {
+					if stamp, parseErr := time.Parse(time.RFC3339, raw); parseErr == nil {
+						since = stamp
+					}
+				}
+			}
+			pushed, skippedEdge, err := s.pushToSupabase(ctx, client, cfg, cfg.PipelinePushLimit, edgeDead, since)
 			step := PipelineStep{Name: "push ke Supabase", OK: err == nil, MS: time.Since(started).Milliseconds(), Counts: map[string]int{"dikirim": pushed}}
 			if err != nil {
 				step.Note = err.Error()
@@ -789,7 +823,7 @@ func (s *Server) RunPipelineMode(testOnly bool) error {
 		}
 
 		// --- langkah 4: housekeeping baris mati di Supabase ---
-		if client.Configured() && cfg.SupabasePruneDays > 0 {
+		if !testOnly && client.Configured() && cfg.SupabasePruneDays > 0 {
 			started := time.Now()
 			deleted, err := s.pruneSupabase(ctx, client, cfg.SupabasePruneDays, 2000)
 			step := PipelineStep{Name: "prune baris mati Supabase", OK: err == nil, MS: time.Since(started).Milliseconds(), Counts: map[string]int{"dihapus": deleted, "hari": cfg.SupabasePruneDays}}
@@ -926,7 +960,13 @@ func (s *Server) AfterCycle() {
 		defer cancel()
 		if cfg.SupabaseAutoPush {
 			edgeDead, _ := client.PullEdgeVerdicts(ctx, 5000)
-			if pushed, heldEdge, err := s.pushToSupabase(ctx, client, cfg, 1000, edgeDead); err != nil {
+			since := time.Time{}
+			if raw, metaErr := s.store.Meta("last_push_at"); metaErr == nil && raw != "" {
+				if stamp, parseErr := time.Parse(time.RFC3339, raw); parseErr == nil {
+					since = stamp
+				}
+			}
+			if pushed, heldEdge, err := s.pushToSupabase(ctx, client, cfg, 1000, edgeDead, since); err != nil {
 				log.Printf("supabase push gagal: %v", err)
 			} else {
 				log.Printf("supabase: %d proxy didorong (%d ditahan: edge bilang mati)", pushed, heldEdge)

@@ -319,3 +319,41 @@ func TestBigZeroYieldDisabledFast(t *testing.T) {
 		t.Fatal("daftar besar tanpa hasil harus dimatikan setelah 2 siklus")
 	}
 }
+
+// Penanda kecil (tanggal scrape harian, waktu push terakhir) harus bisa dibaca kembali.
+func TestMetaRoundTrip(t *testing.T) {
+	st := openTest(t)
+	if v, err := st.Meta("belum_ada"); err != nil || v != "" {
+		t.Fatalf("kunci kosong harus mengembalikan string kosong, dapat %q %v", v, err)
+	}
+	if err := st.SetMeta("last_full_scrape", "2026-11-14T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetMeta("last_full_scrape", "2026-11-15T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	v, err := st.Meta("last_full_scrape")
+	if err != nil || v != "2026-11-15T00:00:00Z" {
+		t.Fatalf("upsert meta gagal: %q %v", v, err)
+	}
+}
+
+// Filter.Since: hanya baris yang dicek setelah waktu itu (dasar push delta).
+func TestFilterSince(t *testing.T) {
+	st := openTest(t)
+	if err := st.RecordAlive("1.1.1.1", 1080, "socks5", "ID", 900, 2, true, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	alive := true
+	all, err := st.List(Filter{Alive: &alive, Limit: 10})
+	if err != nil || len(all) != 1 {
+		t.Fatalf("tanpa Since semua baris harus muncul: %d %v", len(all), err)
+	}
+	future, err := st.List(Filter{Alive: &alive, Limit: 10, Since: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(future) != 0 {
+		t.Fatalf("Since di masa depan tidak boleh mengembalikan baris: %d", len(future))
+	}
+}

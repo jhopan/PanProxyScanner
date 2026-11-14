@@ -1,6 +1,7 @@
 package scraper
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -167,5 +168,26 @@ func TestUnmetFromCounts(t *testing.T) {
 	}
 	if got := unmetFromCounts(list, map[string]int{"SG": 0}); len(got) != 0 {
 		t.Fatalf("target 0 tidak boleh menghasilkan unmet: %v", got)
+	}
+}
+
+// Cek lokal (jadwal 6 jam) tidak boleh menyentuh jaringan sumber: cukup mengembalikan tanpa
+// error walau database kosong dan tanpa mengambil apa pun.
+func TestRunLocalOnly(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "l.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	opts := DefaultOptions()
+	opts.LocalOnly = true
+	opts.RefreshLimit = 0
+	opts.CountryTopUp = 0
+	stats, err := Run(context.Background(), st, opts, nil)
+	if err != nil {
+		t.Fatalf("Run(LocalOnly) tidak boleh error: %v", err)
+	}
+	if len(stats) != 0 {
+		t.Fatalf("LocalOnly tidak mengambil sumber, stats harus kosong: %d", len(stats))
 	}
 }

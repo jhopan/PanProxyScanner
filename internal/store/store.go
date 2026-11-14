@@ -48,9 +48,12 @@ type Filter struct {
 	MaxPing      int
 	MinSources   int
 	FreshMinutes int
-	Limit        int
-	Offset       int
-	Order        string // ping | last_checked | sources
+	// Since membatasi ke baris yang dicek setelah waktu ini (dipakai push delta: hanya yang
+	// berubah sejak push terakhir). Zero = tanpa batas.
+	Since  time.Time
+	Limit  int
+	Offset int
+	Order  string // ping | last_checked | sources
 }
 
 // CountryCount adalah jumlah proxy hidup per negara.
@@ -179,6 +182,11 @@ CREATE TABLE IF NOT EXISTS sources (
 		return err
 	}
 
+	// meta: penanda kecil (tanggal scrape penuh terakhir, waktu push terakhir).
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`); err != nil {
+		return err
+	}
+
 	// kesehatan sumber: berapa kali berturut-turut sebuah sumber tidak menghasilkan proxy
 	for _, col := range []struct{ name, ddl string }{
 		{"last_count", `ALTER TABLE sources ADD COLUMN last_count INTEGER NOT NULL DEFAULT 0`},
@@ -233,6 +241,23 @@ type SourceSeed struct {
 	URL      string
 	Kind     string
 	Optional bool
+}
+
+// Meta membaca nilai kecil non-rahasia (penanda harian, waktu push terakhir).
+func (s *Store) Meta(key string) (string, error) {
+	var value string
+	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = ?`, key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return value, err
+}
+
+// SetMeta menyimpan nilai kecil (upsert).
+func (s *Store) SetMeta(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO meta (key, value) VALUES (?, ?)
+		ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
 }
 
 // EnsureSources menambahkan sumber bawaan yang belum ada di database (tidak menghapus
@@ -527,6 +552,10 @@ func (s *Store) List(f Filter) ([]Proxy, error) {
 	if f.MinSources > 0 {
 		where = append(where, "sources >= ?")
 		args = append(args, f.MinSources)
+	}
+	if !f.Since.IsZero() {
+		where = append(where, "last_checked > ?")
+		args = append(args, f.Since.UTC().Format(time.RFC3339))
 	}
 	if f.FreshMinutes > 0 {
 		where = append(where, "last_checked >= ?")

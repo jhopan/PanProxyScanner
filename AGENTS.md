@@ -68,6 +68,17 @@ go build -ldflags "-X main.version=v0.1.0" -o panproxyscanner.exe .
   bawah targetnya didahulukan verifikasinya. Negara tanpa target khusus memakai default 3, dan
   target 0 berarti tidak diprioritaskan. Ini hanya mengatur **urutan** — semua negara tetap
   di-scrape, dan setiap baris tetap dikategorikan lewat kolom `country`.
+- **Penanda scrape harian**: tanggal scrape penuh terakhir disimpan di tabel `meta`
+  (`last_full_scrape`). Saat proses start, kalau hari ini (zona jadwal) belum ada scrape penuh,
+  pipeline langsung dijalankan (catch-up) lalu penandanya diperbarui. Jadi minimal satu scrape
+  penuh per hari tetap terjadi walau service sempat mati.
+- **Push hanya yang berubah**: waktu push terakhir disimpan di `meta.last_push_at`; push dari
+  jadwal 6 jam / auto-push hanya mengirim baris yang `last_checked`-nya lebih baru dari titik
+  itu (`Filter.Since`). Pipeline harian tetap mengirim menyeluruh (Since kosong).
+- **Semua proxy yang bisa dipakai dipublikasikan**: `push_require_tls` kini bawaan **false** —
+  baris hidup (TLS maupun non-TLS) naik ke `is_active=true`, dan `tls_ok` hanya menjadi penanda
+  kualitas yang dipakai panel/worker untuk memilih. Aturan lama ("hanya TLS yang boleh aktif")
+  diganti karena klien bisa memakai config NTLS; bukti `tls_ok/alt_ok/exit_ip` tetap dikirim.
 - **Dua jadwal**: `schedule_mode=daily` + `daily_at` pada `schedule_timezone` (bawaan 08:00
   Asia/Makassar = 00:00 UTC) menjalankan pipeline penuh (scrape semua sumber → push).
   `test_interval_hours` (bawaan 6) menjalankan **tes berkala** pada kelipatan jam dari 00:00

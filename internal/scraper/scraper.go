@@ -45,8 +45,11 @@ type Options struct {
 	MinSources     int            // hanya verifikasi kandidat yang muncul di >= N sumber (0 = semua)
 	CountryTargets map[string]int // target minimal proxy sanggup TLS per negara (kode 2 huruf)
 	CountryTopUp   int            // kandidat tambahan per siklus untuk negara yang belum mencapai target
-	LowYieldCycles int            // siklus tanpa hasil sebelum sumber dimatikan (0 = tidak)
-	LowYieldMin    int            // minimal entri agar sebuah sumber dinilai yield-nya
+	// LocalOnly melewati pengambilan sumber sama sekali (jadwal cek 6 jam): hanya baris
+	// tersimpan yang diverifikasi ulang + pass target negara.
+	LocalOnly      bool
+	LowYieldCycles int // siklus tanpa hasil sebelum sumber dimatikan (0 = tidak)
+	LowYieldMin    int // minimal entri agar sebuah sumber dinilai yield-nya
 
 	// UpdateSourceHealth menyalakan pencatatan kesehatan sumber; SourceHealthLimit adalah
 	// berapa kali kosong berturut-turut sebelum sumber dimatikan otomatis (0 = tidak dimatikan).
@@ -204,6 +207,9 @@ func CheckSources(ctx context.Context, st *store.Store, opts Options) ([]SourceS
 
 // Run menjalankan satu siklus penuh (blocking).
 func Run(ctx context.Context, st *store.Store, opts Options, sink Sink) ([]SourceStat, error) {
+	if opts.LocalOnly {
+		return runLocal(ctx, st, opts, sink)
+	}
 	if opts.Jobs <= 0 {
 		opts.Jobs = 50
 	}
@@ -291,43 +297,12 @@ func Run(ctx context.Context, st *store.Store, opts Options, sink Sink) ([]Sourc
 		return stats, err
 	}
 
-	// 4. Segarkan baris yang sudah tersimpan tapi catatannya basi.
-	if opts.RefreshLimit > 0 && opts.RefreshAfter > 0 {
-		report(sink, func(p *Progress) { p.Phase = "refresh" })
-		// Baris mati diuji ulang jauh lebih jarang (kelipatan deadRefreshFactor): cukup untuk
-		// memastikan proxy yang hidup kembali terdeteksi, tanpa membakar jatah refresh untuk
-		// ribuan kandidat mass-scan yang sudah jelas mati.
-		stale, err := st.Stale(opts.RefreshAfter, opts.RefreshAfter*deadRefreshFactor, opts.RefreshLimit)
-		if err != nil {
-			return stats, err
-		}
-		addrs := make([]string, 0, len(stale))
-		for _, s := range stale {
-			addrs = append(addrs, s.Addr())
-		}
-		refreshed, _, err := verifyAll(ctx, st, addrs, counts, countries, nil, opts, sink)
-		if err != nil {
-			return stats, err
-		}
-		report(sink, func(p *Progress) { p.Refreshed = refreshed })
+	if err := refreshStored(ctx, st, counts, countries, opts, sink); err != nil {
+		return stats, err
 	}
 
-	// 5. Pass tambahan untuk negara yang stok TLS-nya belum mencapai target: verifikasi ulang
-	//    baris lokal berlabel negara itu (budget terpisah, jadi tidak memakan jatah utama).
-	if opts.CountryTopUp > 0 {
-		unmet := unmetCountries(st, opts.CountryTargets)
-		if len(unmet) > 0 {
-			report(sink, func(p *Progress) { p.Phase = "target negara" })
-			log.Printf("target negara belum terpenuhi: %s — verifikasi tambahan maks %d", strings.Join(unmet, ","), opts.CountryTopUp)
-			extra, err := st.ThinCountryCandidates(unmet, opts.CountryTopUp, opts.RefreshAfter)
-			if err == nil && len(extra) > 0 {
-				filled, _, verr := verifyAll(ctx, st, extra, counts, countries, origin, opts, sink)
-				if verr != nil {
-					return stats, verr
-				}
-				report(sink, func(p *Progress) { p.Refreshed += filled })
-			}
-		}
+	if err := topUpCountries(ctx, st, counts, countries, opts, sink); err != nil {
+		return stats, err
 	}
 
 	return stats, nil
@@ -808,6 +783,9 @@ func OptionsFromSettings(cfg settings.Settings) Options {
 	return opts
 }
 
+// metaLastFull adalah kunci penyimpanan tanggal scrape penuh terakhir (dipakai catch-up).
+const metaLastFull = "last_full_scrape"
+
 // Scheduler menjalankan siklus otomatis. Konfigurasinya bisa diubah saat berjalan (dari
 // halaman Pengaturan di website) tanpa restart proses.
 //
@@ -816,6 +794,8 @@ func OptionsFromSettings(cfg settings.Settings) Options {
 // (tarik dari Supabase → uji → scrape sumber → push kembali), bukan hanya siklus scraping.
 type Scheduler struct {
 	runner *Runner
+	// Store dipakai menyimpan penanda scrape harian (catch-up kalau proses sempat mati).
+	Store *store.Store
 
 	// Pipeline dijalankan sebagai satu jadwal kalau pengaturan PipelineEnabled aktif.
 	// Pipeline menerima testOnly=true untuk jadwal uji berkala: menguji ulang yang tersimpan
@@ -889,8 +869,16 @@ func (s *Scheduler) Start() error {
 	s.running = true
 	s.mu.Unlock()
 
+	// Catch-up: kalau hari ini (zona pengaturan) belum ada scrape penuh, jalankan sekarang.
+	// Proses yang mati semalaman tidak lagi kehilangan jadwal hariannya.
+	if s.needsDailyRun() {
+		log.Printf("scrape harian hari ini belum jalan — menjalankan sekarang (catch-up)")
+		s.markDailyRun()
+		s.RunScheduled(false)
+	}
+
 	go func() {
-		// Jadwal 1: SCrape semua sumber — harian pada jam di zona waktu pengaturan, atau interval.
+		// Jadwal 1: Scrape semua sumber — harian pada jam di zona waktu pengaturan, atau interval.
 		go func() {
 			if cfg.ScheduleMode == "daily" {
 				for {
@@ -903,6 +891,7 @@ func (s *Scheduler) Start() error {
 						timer.Stop()
 						return
 					case <-timer.C:
+						s.markDailyRun()
 						s.RunScheduled(false)
 					}
 				}
@@ -1014,4 +1003,96 @@ func report(sink Sink, fn func(*Progress)) {
 	if sink != nil {
 		sink.Update(fn)
 	}
+}
+
+// needsDailyRun melaporkan apakah scrape penuh untuk hari ini (zona jadwal) belum dijalankan.
+func (s *Scheduler) needsDailyRun() bool {
+	if s.Store == nil {
+		return false
+	}
+	last, err := s.Store.Meta(metaLastFull)
+	if err != nil || last == "" {
+		return true
+	}
+	stamp, err := time.Parse(time.RFC3339, last)
+	if err != nil {
+		return true
+	}
+	loc := s.Config().Location()
+	return stamp.In(loc).Format("2006-01-02") != time.Now().In(loc).Format("2006-01-02")
+}
+
+// markDailyRun mencatat bahwa scrape penuh hari ini sudah dijalankan.
+func (s *Scheduler) markDailyRun() {
+	if s.Store == nil {
+		return
+	}
+	if err := s.Store.SetMeta(metaLastFull, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		log.Printf("gagal menyimpan penanda scrape harian: %v", err)
+	}
+}
+
+// runLocal menjalankan cek tanpa mengambil sumber baru: refresh baris tersimpan + pass target
+// negara. Dipakai jadwal 6 jam supaya pool tetap terjaga tanpa memakan jaringan/CPU sumber.
+func runLocal(ctx context.Context, st *store.Store, opts Options, sink Sink) ([]SourceStat, error) {
+	report(sink, func(p *Progress) { p.Phase = "cek lokal" })
+	counts := make(map[string]int)
+	countries := make(map[string]string)
+	if err := refreshStored(ctx, st, counts, countries, opts, sink); err != nil {
+		return nil, err
+	}
+	if err := topUpCountries(ctx, st, counts, countries, opts, sink); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// refreshStored memverifikasi ulang baris tersimpan yang catatannya basi (dipakai siklus penuh
+// maupun cek lokal 6 jam).
+func refreshStored(ctx context.Context, st *store.Store, counts map[string]int, countries map[string]string, opts Options, sink Sink) error {
+	if opts.RefreshLimit <= 0 || opts.RefreshAfter <= 0 {
+		return nil
+	}
+	if opts.RefreshLimit > 0 && opts.RefreshAfter > 0 {
+		report(sink, func(p *Progress) { p.Phase = "refresh" })
+		// Baris mati diuji ulang jauh lebih jarang (kelipatan deadRefreshFactor): cukup untuk
+		// memastikan proxy yang hidup kembali terdeteksi, tanpa membakar jatah refresh untuk
+		// ribuan kandidat mass-scan yang sudah jelas mati.
+		stale, err := st.Stale(opts.RefreshAfter, opts.RefreshAfter*deadRefreshFactor, opts.RefreshLimit)
+		if err != nil {
+			return err
+		}
+		addrs := make([]string, 0, len(stale))
+		for _, s := range stale {
+			addrs = append(addrs, s.Addr())
+		}
+		refreshed, _, err := verifyAll(ctx, st, addrs, counts, countries, nil, opts, sink)
+		if err != nil {
+			return err
+		}
+		report(sink, func(p *Progress) { p.Refreshed = refreshed })
+	}
+	return nil
+}
+
+// topUpCountries memverifikasi kandidat tambahan untuk negara yang stok TLS-nya belum mencapai
+// target. Budget-nya terpisah dari jatah utama, jadi tidak mengurangi kandidat baru.
+func topUpCountries(ctx context.Context, st *store.Store, counts map[string]int, countries map[string]string, opts Options, sink Sink) error {
+	//    baris lokal berlabel negara itu (budget terpisah, jadi tidak memakan jatah utama).
+	if opts.CountryTopUp > 0 {
+		unmet := unmetCountries(st, opts.CountryTargets)
+		if len(unmet) > 0 {
+			report(sink, func(p *Progress) { p.Phase = "target negara" })
+			log.Printf("target negara belum terpenuhi: %s — verifikasi tambahan maks %d", strings.Join(unmet, ","), opts.CountryTopUp)
+			extra, err := st.ThinCountryCandidates(unmet, opts.CountryTopUp, opts.RefreshAfter)
+			if err == nil && len(extra) > 0 {
+				filled, _, verr := verifyAll(ctx, st, extra, counts, countries, nil, opts, sink)
+				if verr != nil {
+					return verr
+				}
+				report(sink, func(p *Progress) { p.Refreshed += filled })
+			}
+		}
+	}
+	return nil
 }
