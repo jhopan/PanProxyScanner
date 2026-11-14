@@ -671,7 +671,15 @@ type PipelineStatus struct {
 //
 // Dijalankan oleh penjadwal (mode interval/harian saat pipeline diaktifkan) atau manual
 // lewat POST /api/pipeline/run.
+// RunPipeline menjalankan pipeline penuh (dipakai tombol manual dan jadwal scrape).
 func (s *Server) RunPipeline() error {
+	return s.RunPipelineMode(false)
+}
+
+// RunPipelineMode menjalankan pipeline. testOnly=true melewati langkah scrape sumber baru:
+// tarik-verifikasi Supabase, push bukti terbaru, dan housekeeping tetap jalan. Dipakai jadwal
+// uji berkala (6 jam) supaya pool terjaga tanpa memakan sumber setiap kali.
+func (s *Server) RunPipelineMode(testOnly bool) error {
 	if !s.pipelineRun.TryLock() {
 		return fmt.Errorf("pipeline lain sedang berjalan")
 	}
@@ -713,30 +721,35 @@ func (s *Server) RunPipeline() error {
 		}
 
 		// --- langkah 2: scrape sumber lalu verifikasi ---
-		started := time.Now()
-		opts := scraper.OptionsFromSettings(cfg)
-		// Siklus manual/otomatis lain bisa sedang berjalan; tunggu dulu supaya langkah ini
-		// tidak dicatat gagal hanya karena berebut runner.
-		_ = s.waitForCycle(ctx, 15*time.Minute)
-		scrapeErr := s.runner.Start(opts)
-		if scrapeErr == nil {
-			scrapeErr = s.waitForCycle(ctx, 90*time.Minute)
+		if testOnly {
+			s.addPipelineStep(PipelineStep{Name: "scrape sumber & verifikasi", OK: true, Note: "dilewati (mode tes berkala)"})
+		} else {
+			started := time.Now()
+			opts := scraper.OptionsFromSettings(cfg)
+			// Siklus manual/otomatis lain bisa sedang berjalan; tunggu dulu supaya langkah ini
+			// tidak dicatat gagal hanya karena berebut runner.
+			_ = s.waitForCycle(ctx, 15*time.Minute)
+			scrapeErr := s.runner.Start(opts)
+			if scrapeErr == nil {
+				scrapeErr = s.waitForCycle(ctx, 90*time.Minute)
+			}
+			progress := s.runner.Progress()
+			busy := scrapeErr != nil && strings.Contains(scrapeErr.Error(), "siklus lain")
+			step := PipelineStep{
+				Name: "scrape sumber & verifikasi", OK: scrapeErr == nil || busy, MS: time.Since(started).Milliseconds(),
+				Counts: map[string]int{"kandidat": progress.Candidates, "dicek": progress.Checked, "hidup": progress.Alive, "mati": progress.Dead},
+			}
+			switch {
+			case busy:
+				step.Note = "dilewati — siklus lain mengerjakan pekerjaan yang sama"
+			case scrapeErr != nil:
+				step.Note = scrapeErr.Error()
+			default:
+				step.Note = fmt.Sprintf("%d kandidat diperiksa, %d hidup", progress.Checked, progress.Alive)
+			}
+			s.addPipelineStep(step)
+
 		}
-		progress := s.runner.Progress()
-		busy := scrapeErr != nil && strings.Contains(scrapeErr.Error(), "siklus lain")
-		step := PipelineStep{
-			Name: "scrape sumber & verifikasi", OK: scrapeErr == nil || busy, MS: time.Since(started).Milliseconds(),
-			Counts: map[string]int{"kandidat": progress.Candidates, "dicek": progress.Checked, "hidup": progress.Alive, "mati": progress.Dead},
-		}
-		switch {
-		case busy:
-			step.Note = "dilewati — siklus lain mengerjakan pekerjaan yang sama"
-		case scrapeErr != nil:
-			step.Note = scrapeErr.Error()
-		default:
-			step.Note = fmt.Sprintf("%d kandidat diperiksa, %d hidup", progress.Checked, progress.Alive)
-		}
-		s.addPipelineStep(step)
 
 		// --- langkah 3: push hasil ke Supabase ---
 		if client.Configured() && cfg.PipelinePushLimit > 0 {
@@ -1058,38 +1071,41 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var patch struct {
-		Auto                *bool   `json:"auto"`
-		IntervalMinutes     *int    `json:"interval_minutes"`
-		AutoRotate          *bool   `json:"auto_rotate"`
-		Cap                 *int    `json:"cap"`
-		Jobs                *int    `json:"jobs"`
-		MinSources          *int    `json:"min_sources"`
-		RefreshLimit        *int    `json:"refresh_limit"`
-		RefreshAfterMinutes *int    `json:"refresh_after_minutes"`
-		FreshMinutes        *int    `json:"fresh_minutes"`
-		PurgeDeadHours      *int    `json:"purge_dead_hours"`
-		Token               *string `json:"token"`
-		AdminUser           *string `json:"admin_user"`
-		AdminPassword       *string `json:"admin_password"`
-		PublicURL           *string `json:"public_url"`
-		TunnelName          *string `json:"tunnel_name"`
-		TunnelDomain        *string `json:"tunnel_domain"`
-		SupabaseURL         *string `json:"supabase_url"`
-		SupabaseKey         *string `json:"supabase_key"`
-		SupabaseTable       *string `json:"supabase_table"`
-		SupabaseAutoPush    *bool   `json:"supabase_auto_push"`
-		SupabasePullLimit   *int    `json:"supabase_pull_limit"`
-		ScheduleMode        *string `json:"schedule_mode"`
-		DailyAt             *string `json:"daily_at"`
-		PipelineEnabled     *bool   `json:"pipeline_enabled"`
-		PipelinePullLimit   *int    `json:"pipeline_pull_limit"`
-		PipelinePushLimit   *int    `json:"pipeline_push_limit"`
-		ProbeTLS            *bool   `json:"probe_tls"`
-		ProbeAlt            *bool   `json:"probe_alt"`
-		PushRequireTLS      *bool   `json:"push_require_tls"`
-		SupabasePruneDays   *int    `json:"supabase_prune_days"`
-		AutoDisableSources  *bool   `json:"auto_disable_sources"`
-		ZeroStreakLimit     *int    `json:"zero_streak_limit"`
+		Auto                *bool           `json:"auto"`
+		IntervalMinutes     *int            `json:"interval_minutes"`
+		AutoRotate          *bool           `json:"auto_rotate"`
+		Cap                 *int            `json:"cap"`
+		Jobs                *int            `json:"jobs"`
+		MinSources          *int            `json:"min_sources"`
+		RefreshLimit        *int            `json:"refresh_limit"`
+		RefreshAfterMinutes *int            `json:"refresh_after_minutes"`
+		FreshMinutes        *int            `json:"fresh_minutes"`
+		PurgeDeadHours      *int            `json:"purge_dead_hours"`
+		Token               *string         `json:"token"`
+		AdminUser           *string         `json:"admin_user"`
+		AdminPassword       *string         `json:"admin_password"`
+		PublicURL           *string         `json:"public_url"`
+		TunnelName          *string         `json:"tunnel_name"`
+		TunnelDomain        *string         `json:"tunnel_domain"`
+		SupabaseURL         *string         `json:"supabase_url"`
+		SupabaseKey         *string         `json:"supabase_key"`
+		SupabaseTable       *string         `json:"supabase_table"`
+		SupabaseAutoPush    *bool           `json:"supabase_auto_push"`
+		SupabasePullLimit   *int            `json:"supabase_pull_limit"`
+		ScheduleMode        *string         `json:"schedule_mode"`
+		DailyAt             *string         `json:"daily_at"`
+		PipelineEnabled     *bool           `json:"pipeline_enabled"`
+		PipelinePullLimit   *int            `json:"pipeline_pull_limit"`
+		PipelinePushLimit   *int            `json:"pipeline_push_limit"`
+		ProbeTLS            *bool           `json:"probe_tls"`
+		ProbeAlt            *bool           `json:"probe_alt"`
+		PushRequireTLS      *bool           `json:"push_require_tls"`
+		SupabasePruneDays   *int            `json:"supabase_prune_days"`
+		AutoDisableSources  *bool           `json:"auto_disable_sources"`
+		ZeroStreakLimit     *int            `json:"zero_streak_limit"`
+		CountryTargets      *map[string]int `json:"country_targets"`
+		ScheduleTimezone    *string         `json:"schedule_timezone"`
+		TestIntervalHours   *int            `json:"test_interval_hours"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body JSON tidak valid: " + err.Error()})
@@ -1194,6 +1210,15 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if patch.ZeroStreakLimit != nil {
 		cfg.ZeroStreakLimit = *patch.ZeroStreakLimit
 	}
+	if patch.CountryTargets != nil {
+		cfg.CountryTargets = *patch.CountryTargets
+	}
+	if patch.ScheduleTimezone != nil {
+		cfg.ScheduleTimezone = strings.TrimSpace(*patch.ScheduleTimezone)
+	}
+	if patch.TestIntervalHours != nil {
+		cfg.TestIntervalHours = *patch.TestIntervalHours
+	}
 	cfg.Normalize()
 	*s.settings = cfg
 	s.mu.Unlock()
@@ -1241,6 +1266,9 @@ func publicSettings(cfg settings.Settings) map[string]any {
 		"supabase_prune_days":   cfg.SupabasePruneDays,
 		"auto_disable_sources":  cfg.AutoDisableSources,
 		"zero_streak_limit":     cfg.ZeroStreakLimit,
+		"country_targets":       cfg.CountryTargets,
+		"schedule_timezone":     cfg.ScheduleTimezone,
+		"test_interval_hours":   cfg.TestIntervalHours,
 		"token":                 cfg.Token,
 	}
 }

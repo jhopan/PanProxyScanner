@@ -64,6 +64,14 @@ go build -ldflags "-X main.version=v0.1.0" -o panproxyscanner.exe .
 - Database: SQLite satu berkas; migrasi idempoten (`columnExists` + `ALTER TABLE`) — tabel dibuat
   sebelum migrasi kolomnya.
 - Verdict kualitas (`tls_ok`, `alt_ok`, `exit_ip`) = hasil **terakhir**, bukan "pernah bisa".
+- **Target per negara** (`country_targets`, kode 2 huruf → angka): negara yang stok TLS-nya di
+  bawah targetnya didahulukan verifikasinya. Negara tanpa target khusus memakai default 3, dan
+  target 0 berarti tidak diprioritaskan. Ini hanya mengatur **urutan** — semua negara tetap
+  di-scrape, dan setiap baris tetap dikategorikan lewat kolom `country`.
+- **Dua jadwal**: `schedule_mode=daily` + `daily_at` pada `schedule_timezone` (bawaan 08:00
+  Asia/Makassar = 00:00 UTC) menjalankan pipeline penuh (scrape semua sumber → push).
+  `test_interval_hours` (bawaan 6) menjalankan **tes berkala** pada kelipatan jam dari 00:00
+  UTC: verifikasi ulang baris tersimpan + pull-verify Supabase + push bukti, tanpa scrape baru.
 
 ## Aturan kualitas pool (jangan dilonggarkan tanpa alasan)
 

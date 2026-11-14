@@ -1,6 +1,10 @@
 package scraper
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/jhopan/Pan-ProxyScanner/internal/store"
+)
 
 func TestSplitAddr(t *testing.T) {
 	cases := []struct {
@@ -87,5 +91,35 @@ func TestRankPrefersThinCountries(t *testing.T) {
 	got = rank(union, counts, countries, map[string]bool{}, 0)
 	if got[0] != "1.1.1.1:1080" {
 		t.Fatalf("tanpa prioritas, kandidat terbanyak-sumber harus lebih dulu, dapat %v", got)
+	}
+}
+
+// Target per negara: negara dengan target khusus dianggap tipis sampai stok TLS-nya mencapai
+// target; negara lain memakai default; target 0 berarti tidak diprioritaskan.
+func TestThinFromCounts(t *testing.T) {
+	list := []store.CountryCount{
+		{Country: "ID", Alive: 4, TLS: 1},
+		{Country: "US", Alive: 9, TLS: 9},
+		{Country: "SG", Alive: 3, TLS: 3},
+		{Country: "JP", Alive: 2, TLS: 2},
+	}
+	targets := map[string]int{"ID": 5, "SG": 3, "JP": 0}
+	thin := thinFromCounts(list, targets)
+	if !thin["ID"] {
+		t.Fatal("ID (1 dari target 5) harus tipis")
+	}
+	if thin["SG"] {
+		t.Fatal("SG sudah mencapai target 3, tidak boleh tipis")
+	}
+	if thin["JP"] {
+		t.Fatal("target 0 berarti tidak diprioritaskan")
+	}
+	// Negara tanpa target khusus memakai default (3): US 9 sudah cukup.
+	if thin["US"] {
+		t.Fatal("US tanpa target khusus sudah di atas default, tidak boleh tipis")
+	}
+	// Negara bertarget tapi belum punya baris sama sekali tetap tipis.
+	if !thin["MY"] && !thin["ID"] {
+		t.Fatal("negara bertarget khusus harus dianggap tipis minimal saat stok kurang")
 	}
 }

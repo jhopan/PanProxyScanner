@@ -18,38 +18,48 @@ import (
 
 // Settings adalah konfigurasi yang bisa diubah tanpa restart.
 type Settings struct {
-	Auto                bool   `json:"auto"`                  // siklus otomatis aktif
-	IntervalMinutes     int    `json:"interval_minutes"`      // jarak antar siklus (mode interval)
-	ScheduleMode        string `json:"schedule_mode"`         // "interval" atau "daily"
-	DailyAt             string `json:"daily_at"`              // "HH:MM" untuk mode daily (waktu lokal)
-	PipelineEnabled     bool   `json:"pipeline_enabled"`      // siklus otomatis menjalankan pipeline penuh
-	PipelinePullLimit   int    `json:"pipeline_pull_limit"`   // baris Supabase yang diuji di awal pipeline (0 = pakai supabase_pull_limit)
-	PipelinePushLimit   int    `json:"pipeline_push_limit"`   // proxy yang dikirim ke Supabase di akhir pipeline
-	ProbeTLS            bool   `json:"probe_tls"`             // uji tambahan tunnel 443 dengan TLS terverifikasi
-	ProbeAlt            bool   `json:"probe_alt"`             // uji tambahan port non-standar (8443/2053)
-	PushRequireTLS      bool   `json:"push_require_tls"`      // hanya kirim proxy yang sanggup TLS 443 ke Supabase
-	SupabasePruneDays   int    `json:"supabase_prune_days"`   // hapus baris mati di Supabase yang lebih tua dari N hari (0 = tidak)
-	AutoDisableSources  bool   `json:"auto_disable_sources"`  // matikan sumber yang berkali-kali kosong
-	ZeroStreakLimit     int    `json:"zero_streak_limit"`     // berapa kali kosong berturut-turut sebelum dimatikan
-	AutoRotate          bool   `json:"auto_rotate"`           // geser slice tiap siklus
-	Cap                 int    `json:"cap"`                   // kandidat baru per siklus
-	Jobs                int    `json:"jobs"`                  // verifikasi paralel
-	MinSources          int    `json:"min_sources"`           // hanya kandidat muncul di >= N sumber
-	RefreshLimit        int    `json:"refresh_limit"`         // baris lama yang diverifikasi ulang
-	RefreshAfterMinutes int    `json:"refresh_after_minutes"` // umur catatan sebelum diverifikasi ulang
-	FreshMinutes        int    `json:"fresh_minutes"`         // jendela kesegaran statistik/API
-	PurgeDeadHours      int    `json:"purge_dead_hours"`      // hapus catatan mati lebih tua dari N jam (0 = tidak)
-	AdminUser           string `json:"admin_user"`            // user untuk login website
-	AdminPasswordHash   string `json:"admin_password_hash"`   // SHA-256 hex; tidak pernah dikirim ke klien
-	PublicURL           string `json:"public_url"`            // URL publik (mis. hasil CF Tunnel), opsional
-	TunnelName          string `json:"tunnel_name"`           // nama tunnel Cloudflare
-	TunnelDomain        string `json:"tunnel_domain"`         // domain yang diarahkan ke panel
-	SupabaseURL         string `json:"supabase_url"`          // URL project Supabase (untuk sinkron proxy_pool)
-	SupabaseKey         string `json:"supabase_key"`          // anon/service key Supabase
-	SupabaseTable       string `json:"supabase_table"`        // tabel tujuan (default proxy_pool)
-	SupabaseAutoPush    bool   `json:"supabase_auto_push"`    // dorong hasil siklus ke Supabase otomatis
-	SupabasePullLimit   int    `json:"supabase_pull_limit"`   // baris Supabase yang diverifikasi ulang per siklus (0 = tidak)
-	Token               string `json:"token,omitempty"`       // kalau diisi, API wajib token (untuk klien mesin)
+	Auto                bool           `json:"auto"`                  // siklus otomatis aktif
+	IntervalMinutes     int            `json:"interval_minutes"`      // jarak antar siklus (mode interval)
+	ScheduleMode        string         `json:"schedule_mode"`         // "interval" atau "daily"
+	DailyAt             string         `json:"daily_at"`              // "HH:MM" untuk mode daily (waktu lokal)
+	PipelineEnabled     bool           `json:"pipeline_enabled"`      // siklus otomatis menjalankan pipeline penuh
+	PipelinePullLimit   int            `json:"pipeline_pull_limit"`   // baris Supabase yang diuji di awal pipeline (0 = pakai supabase_pull_limit)
+	PipelinePushLimit   int            `json:"pipeline_push_limit"`   // proxy yang dikirim ke Supabase di akhir pipeline
+	ProbeTLS            bool           `json:"probe_tls"`             // uji tambahan tunnel 443 dengan TLS terverifikasi
+	ProbeAlt            bool           `json:"probe_alt"`             // uji tambahan port non-standar (8443/2053)
+	PushRequireTLS      bool           `json:"push_require_tls"`      // hanya kirim proxy yang sanggup TLS 443 ke Supabase
+	SupabasePruneDays   int            `json:"supabase_prune_days"`   // hapus baris mati di Supabase yang lebih tua dari N hari (0 = tidak)
+	AutoDisableSources  bool           `json:"auto_disable_sources"`  // matikan sumber yang berkali-kali kosong
+	ZeroStreakLimit     int            `json:"zero_streak_limit"`     // berapa kali kosong berturut-turut sebelum dimatikan
+	AutoRotate          bool           `json:"auto_rotate"`           // geser slice tiap siklus
+	Cap                 int            `json:"cap"`                   // kandidat baru per siklus
+	Jobs                int            `json:"jobs"`                  // verifikasi paralel
+	MinSources          int            `json:"min_sources"`           // hanya kandidat muncul di >= N sumber
+	RefreshLimit        int            `json:"refresh_limit"`         // baris lama yang diverifikasi ulang
+	RefreshAfterMinutes int            `json:"refresh_after_minutes"` // umur catatan sebelum diverifikasi ulang
+	FreshMinutes        int            `json:"fresh_minutes"`         // jendela kesegaran statistik/API
+	PurgeDeadHours      int            `json:"purge_dead_hours"`      // hapus catatan mati lebih tua dari N jam (0 = tidak)
+	AdminUser           string         `json:"admin_user"`            // user untuk login website
+	AdminPasswordHash   string         `json:"admin_password_hash"`   // SHA-256 hex; tidak pernah dikirim ke klien
+	PublicURL           string         `json:"public_url"`            // URL publik (mis. hasil CF Tunnel), opsional
+	TunnelName          string         `json:"tunnel_name"`           // nama tunnel Cloudflare
+	TunnelDomain        string         `json:"tunnel_domain"`         // domain yang diarahkan ke panel
+	SupabaseURL         string         `json:"supabase_url"`          // URL project Supabase (untuk sinkron proxy_pool)
+	SupabaseKey         string         `json:"supabase_key"`          // anon/service key Supabase
+	SupabaseTable       string         `json:"supabase_table"`        // tabel tujuan (default proxy_pool)
+	SupabaseAutoPush    bool           `json:"supabase_auto_push"`    // dorong hasil siklus ke Supabase otomatis
+	SupabasePullLimit   int            `json:"supabase_pull_limit"`   // baris Supabase yang diverifikasi ulang per siklus (0 = tidak)
+	CountryTargets      map[string]int `json:"country_targets"`       // target minimal proxy sanggup TLS per negara (kode 2 huruf)
+	ScheduleTimezone    string         `json:"schedule_timezone"`     // zona waktu untuk daily_at, mis. Asia/Makassar (WITA)
+	TestIntervalHours   int            `json:"test_interval_hours"`   // uji ulang berkala (jam); 0 = mati
+	Token               string         `json:"token,omitempty"`       // kalau diisi, API wajib token (untuk klien mesin)
+}
+
+// DefaultCountryTargets adalah target awal stok per negara. Negara di sini didahulukan
+// verifikasinya, sedangkan negara lain tetap dianggap tipis selama stok TLS-nya di bawah
+// defaultCountryTarget — jadi scraping tetap mencakup semua negara, hanya urutannya diatur.
+func DefaultCountryTargets() map[string]int {
+	return map[string]int{"ID": 5, "SG": 3, "MY": 3, "JP": 3, "HK": 3, "KR": 3}
 }
 
 // DefaultPasswordHash adalah hash dari sandi bawaan "admin" (admin/admin).
@@ -98,6 +108,9 @@ func Default() Settings {
 		SupabaseTable:       "proxy_pool",
 		SupabaseAutoPush:    false,
 		SupabasePullLimit:   0,
+		CountryTargets:      DefaultCountryTargets(),
+		ScheduleTimezone:    "Asia/Makassar", // WITA: 08:00 di sini = 00:00 UTC
+		TestIntervalHours:   6,
 	}
 }
 
@@ -195,6 +208,34 @@ func (s *Settings) Normalize() {
 	if s.ZeroStreakLimit > 100 {
 		s.ZeroStreakLimit = 100
 	}
+	if s.TestIntervalHours < 0 {
+		s.TestIntervalHours = 0
+	}
+	if s.TestIntervalHours > 24 {
+		s.TestIntervalHours = 24
+	}
+	if s.CountryTargets == nil {
+		s.CountryTargets = DefaultCountryTargets()
+	}
+	cleaned := make(map[string]int, len(s.CountryTargets))
+	for code, target := range s.CountryTargets {
+		key := strings.ToUpper(strings.TrimSpace(code))
+		if len(key) != 2 {
+			continue
+		}
+		if target < 0 {
+			target = 0
+		}
+		if target > 200 {
+			target = 200
+		}
+		cleaned[key] = target
+	}
+	s.CountryTargets = cleaned
+	s.ScheduleTimezone = strings.TrimSpace(s.ScheduleTimezone)
+	if _, err := time.LoadLocation(s.ScheduleTimezone); err != nil {
+		s.ScheduleTimezone = d.ScheduleTimezone
+	}
 }
 
 // validClock memeriksa format "HH:MM".
@@ -206,6 +247,52 @@ func validClock(value string) bool {
 	hour, err1 := strconv.Atoi(parts[0])
 	minute, err2 := strconv.Atoi(parts[1])
 	return err1 == nil && err2 == nil && hour >= 0 && hour < 24 && minute >= 0 && minute < 60
+}
+
+// Location mengembalikan zona waktu jadwal; UTC kalau tidak dikenal.
+func (s Settings) Location() *time.Location {
+	loc, err := time.LoadLocation(strings.TrimSpace(s.ScheduleTimezone))
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
+// NextTestRun mengembalikan jadwal uji berkala berikutnya: kelipatan `hours` dari tengah malam
+// UTC. Dipakai supaya saatnya bisa diprediksi (00:00, 06:00, 12:00, 18:00 UTC) alih-alih
+// bergeser mengikuti kapan proses dinyalakan.
+func NextTestRun(now time.Time, hours int) time.Time {
+	if hours <= 0 {
+		return time.Time{}
+	}
+	if hours > 24 {
+		hours = 24
+	}
+	utc := now.UTC()
+	base := time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC)
+	step := time.Duration(hours) * time.Hour
+	elapsed := utc.Sub(base)
+	next := base.Add((elapsed/step + 1) * step)
+	return next
+}
+
+// NextDailyIn mengembalikan waktu jalan berikutnya untuk mode daily pada zona waktu tertentu.
+func NextDailyIn(dailyAt string, now time.Time, loc *time.Location) time.Time {
+	if !validClock(dailyAt) {
+		dailyAt = Default().DailyAt
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	parts := strings.Split(dailyAt, ":")
+	hour, _ := strconv.Atoi(parts[0])
+	minute, _ := strconv.Atoi(parts[1])
+	local := now.In(loc)
+	next := time.Date(local.Year(), local.Month(), local.Day(), hour, minute, 0, 0, loc)
+	if !next.After(now) {
+		next = next.Add(24 * time.Hour)
+	}
+	return next
 }
 
 // NextDaily mengembalikan waktu jalan berikutnya untuk mode daily ("HH:MM" waktu lokal).

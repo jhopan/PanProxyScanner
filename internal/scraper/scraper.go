@@ -34,15 +34,16 @@ var preferredPorts = map[int]bool{
 
 // Options mengatur satu siklus scraping.
 type Options struct {
-	SourceList   []sources.Source
-	Cap          int           // batas kandidat baru yang diverifikasi
-	Offset       int           // geser slice (untuk rotasi antar siklus)
-	Jobs         int           // jumlah verifikasi paralel
-	FetchTimeout time.Duration // timeout per sumber
-	Checker      checker.Options
-	RefreshLimit int           // berapa baris tersimpan yang diverifikasi ulang
-	RefreshAfter time.Duration // umur catatan sebelum diverifikasi ulang
-	MinSources   int           // hanya verifikasi kandidat yang muncul di >= N sumber (0 = semua)
+	SourceList     []sources.Source
+	Cap            int           // batas kandidat baru yang diverifikasi
+	Offset         int           // geser slice (untuk rotasi antar siklus)
+	Jobs           int           // jumlah verifikasi paralel
+	FetchTimeout   time.Duration // timeout per sumber
+	Checker        checker.Options
+	RefreshLimit   int            // berapa baris tersimpan yang diverifikasi ulang
+	RefreshAfter   time.Duration  // umur catatan sebelum diverifikasi ulang
+	MinSources     int            // hanya verifikasi kandidat yang muncul di >= N sumber (0 = semua)
+	CountryTargets map[string]int // target minimal proxy sanggup TLS per negara (kode 2 huruf)
 
 	// UpdateSourceHealth menyalakan pencatatan kesehatan sumber; SourceHealthLimit adalah
 	// berapa kali kosong berturut-turut sebelum sumber dimatikan otomatis (0 = tidak dimatikan).
@@ -218,7 +219,7 @@ func Run(ctx context.Context, st *store.Store, opts Options, sink Sink) ([]Sourc
 
 	// 2. Prioritaskan negara yang stoknya tipis, lalu yang muncul di banyak sumber
 	//    (sinyal kualitas), lalu port umum.
-	thin := thinCountries(st)
+	thin := thinCountries(st, opts.CountryTargets)
 	if len(thin) > 0 {
 		codes := make([]string, 0, len(thin))
 		for code := range thin {
@@ -376,35 +377,47 @@ func fetchAll(ctx context.Context, opts Options) ([]SourceStat, map[string]struc
 }
 
 // rank menyusun urutan kandidat: terbanyak muncul di sumber dulu, lalu port umum.
-// countryTarget adalah jumlah minimal proxy yang sanggup TLS 443 per negara.
-// Di bawah angka ini, kandidat dari negara tersebut didahulukan: daftar mass-scan berisi
-// ratusan ribu entri sehingga tanpa prioritas, negara seperti ID/SG nyaris tidak pernah
-// kebagian giliran verifikasi (terukur 2026-11-14: ID 0, SG 1 dari 36 proxy bertanda tembus).
-const countryTarget = 3
+// defaultCountryTarget: negara yang tidak punya target khusus tetap didahulukan selama stok
+// TLS-nya di bawah angka ini. Jadi pencarian tetap menyeluruh (semua negara di-scrape), hanya
+// urutan verifikasinya yang diatur supaya negara tipis tidak kalah oleh daftar mass-scan.
+const defaultCountryTarget = 3
 
-// priorityCountries selalu dianggap tipis selama stoknya belum mencapai countryTarget,
-// walaupun databasenya belum punya satu baris pun untuk negara itu.
-var priorityCountries = []string{"ID", "SG", "MY", "JP", "HK", "KR"}
-
-// thinCountries mengembalikan negara yang stok TLS-nya masih di bawah target.
-func thinCountries(st *store.Store) map[string]bool {
-	out := make(map[string]bool, len(priorityCountries)+8)
-	for _, code := range priorityCountries {
-		out[code] = true
-	}
-	list, err := st.Countries(true)
-	if err != nil {
-		return out
+// thinFromCounts adalah bagian murni dari penentuan negara tipis (bisa diuji tanpa database).
+func thinFromCounts(list []store.CountryCount, targets map[string]int) map[string]bool {
+	out := make(map[string]bool, len(targets)+8)
+	for code, target := range targets {
+		key := strings.ToUpper(strings.TrimSpace(code))
+		if len(key) == 2 && target > 0 {
+			out[key] = true // negara bertarget khusus dianggap tipis sampai targetnya terpenuhi
+		}
 	}
 	for _, c := range list {
 		code := strings.ToUpper(strings.TrimSpace(c.Country))
-		if code == "" || c.TLS >= countryTarget {
-			delete(out, code)
+		if code == "" {
 			continue
 		}
-		out[code] = true
+		target := defaultCountryTarget
+		if t, ok := targets[code]; ok {
+			target = t
+		}
+		switch {
+		case target <= 0:
+			delete(out, code) // target 0 = negara ini tidak diprioritaskan
+		case c.TLS >= target:
+			delete(out, code)
+		default:
+			out[code] = true
+		}
 	}
 	return out
+}
+
+func thinCountries(st *store.Store, targets map[string]int) map[string]bool {
+	list, err := st.Countries(true)
+	if err != nil {
+		return thinFromCounts(nil, targets)
+	}
+	return thinFromCounts(list, targets)
 }
 
 func rank(union map[string]struct{}, counts map[string]int, countries map[string]string, thin map[string]bool, minSources int) []string {
@@ -702,6 +715,7 @@ func OptionsFromSettings(cfg settings.Settings) Options {
 	opts.Checker.ProbeAlt = cfg.ProbeAlt
 	opts.UpdateSourceHealth = cfg.AutoDisableSources
 	opts.SourceHealthLimit = cfg.ZeroStreakLimit
+	opts.CountryTargets = cfg.CountryTargets
 	return opts
 }
 
@@ -715,7 +729,9 @@ type Scheduler struct {
 	runner *Runner
 
 	// Pipeline dijalankan sebagai satu jadwal kalau pengaturan PipelineEnabled aktif.
-	Pipeline func() error
+	// Pipeline menerima testOnly=true untuk jadwal uji berkala: menguji ulang yang tersimpan
+	// tanpa scraping sumber baru (lebih hemat).
+	Pipeline func(testOnly bool) error
 
 	mu      sync.Mutex
 	cfg     settings.Settings
@@ -785,51 +801,80 @@ func (s *Scheduler) Start() error {
 	s.mu.Unlock()
 
 	go func() {
-		if cfg.ScheduleMode == "daily" {
-			// Mode harian: tidak jalan langsung, tunggu jam yang diatur (waktu lokal).
-			log.Printf("penjadwal harian: jalan berikutnya %s", settings.NextDaily(s.Config().DailyAt, time.Now()).Format("2006-01-02 15:04"))
+		// Jadwal 1: SCrape semua sumber — harian pada jam di zona waktu pengaturan, atau interval.
+		go func() {
+			if cfg.ScheduleMode == "daily" {
+				for {
+					cur := s.Config()
+					next := settings.NextDailyIn(cur.DailyAt, time.Now(), cur.Location())
+					log.Printf("jadwal scrape: berikutnya %s (zona %s)", next.Format("2006-01-02 15:04 MST"), cur.ScheduleTimezone)
+					timer := time.NewTimer(time.Until(next))
+					select {
+					case <-ctx.Done():
+						timer.Stop()
+						return
+					case <-timer.C:
+						s.RunScheduled(false)
+					}
+				}
+			}
+			s.RunScheduled(false)
+			ticker := time.NewTicker(cfg.Interval())
+			defer ticker.Stop()
 			for {
-				next := settings.NextDaily(s.Config().DailyAt, time.Now())
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					s.RunScheduled(false)
+				}
+			}
+		}()
+
+		// Jadwal 2: uji ulang berkala (bawaan 6 jam, kelipatan dari 00:00 UTC) supaya pool
+		// tetap terjaga tanpa menyerap sumber baru setiap kali.
+		hours := cfg.TestIntervalHours
+		if hours > 0 {
+			for {
+				next := settings.NextTestRun(time.Now(), s.Config().TestIntervalHours)
+				log.Printf("jadwal tes: berikutnya %s UTC (tiap %d jam)", next.Format("2006-01-02 15:04"), s.Config().TestIntervalHours)
 				timer := time.NewTimer(time.Until(next))
 				select {
 				case <-ctx.Done():
 					timer.Stop()
 					return
 				case <-timer.C:
-					log.Printf("penjadwal harian: menjalankan jadwal %s", time.Now().Format("2006-01-02 15:04"))
-					s.RunScheduled()
-					nextRun := settings.NextDaily(s.Config().DailyAt, time.Now())
-					log.Printf("penjadwal harian: jalan berikutnya %s", nextRun.Format("2006-01-02 15:04"))
+					s.RunScheduled(true)
 				}
 			}
 		}
-
-		s.RunScheduled()
-		ticker := time.NewTicker(cfg.Interval())
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				s.RunScheduled()
-			}
-		}
+		<-ctx.Done()
 	}()
 	return nil
 }
 
 // RunScheduled menjalankan pekerjaan sesuai jadwal: pipeline penuh kalau diaktifkan,
 // atau satu siklus scraping biasa.
-func (s *Scheduler) RunScheduled() {
+func (s *Scheduler) RunScheduled(testOnly bool) {
 	cfg := s.Config()
 	// Catat waktu jalan juga untuk jalur pipeline: tanpa ini `LastRun()` tetap nol dan UI
 	// menampilkan "jadwal berikutnya" = sekarang (menyesatkan).
 	s.mu.Lock()
 	s.lastRun = time.Now()
 	s.mu.Unlock()
+	if testOnly {
+		// Uji berkala: hanya menguji ulang yang sudah tersimpan + push bukti terbaru.
+		if s.Pipeline == nil {
+			log.Printf("jadwal tes: pipeline belum disiapkan, dilewati")
+			return
+		}
+		if err := s.Pipeline(true); err != nil {
+			log.Printf("tes berkala gagal: %v", err)
+		}
+		return
+	}
 	if cfg.PipelineEnabled && s.Pipeline != nil {
-		if err := s.Pipeline(); err != nil {
+		if err := s.Pipeline(false); err != nil {
 			log.Printf("pipeline gagal: %v", err)
 		}
 		return

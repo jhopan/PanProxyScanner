@@ -334,6 +334,17 @@ Dengan `supabase_auto_push=true` dan `supabase_pull_limit=50`, panel CFVPN Hub s
 menemukan daftar segar (`is_active=true` + `last_checked` baru) tanpa satu pun request
 verifikasi dari browser.
 
+## Jadwal
+
+- **Scrape harian** pada `daily_at` di zona `schedule_timezone` (bawaan `08:00` `Asia/Makassar` =
+  00:00 UTC): pipeline penuh — scrape semua sumber, verifikasi, push ke Supabase.
+- **Tes berkala** tiap `test_interval_hours` jam (bawaan 6, jatuh pada kelipatan dari 00:00 UTC):
+  hanya menguji ulang baris tersimpan + pull-verify + push, jadi pool terjaga tanpa memakan
+  sumber baru setiap kali.
+- **Target per negara** `country_targets` (contoh `{"ID": 5, "SG": 3}`) mengatur **urutan**
+  verifikasi: negara yang stok TLS-nya di bawah target didahulukan. Semua negara tetap
+  di-scrape, dan setiap baris punya kategori `country`.
+
 ## Pipeline harian (alur utama)
 
 Jadwal (menu **Pipeline**) menjalankan satu alur penuh — cocok dijalankan sekali tiap pagi:

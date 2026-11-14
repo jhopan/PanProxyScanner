@@ -292,14 +292,18 @@ func runServe(ctx context.Context) error {
 	// Setiap siklus selesai: dorong hasil ke Supabase dan/atau verifikasi baris lama.
 	runner.OnFinish = func(scraper.Progress, []scraper.SourceStat) { apiServer.AfterCycle() }
 	// Jadwal (interval/harian) menjalankan pipeline penuh kalau PipelineEnabled aktif.
-	sched.Pipeline = apiServer.RunPipeline
+	sched.Pipeline = apiServer.RunPipelineMode
 	srv := &http.Server{Addr: effAddr, Handler: apiServer.Handler()}
 
 	if cfg.Auto {
 		if err := sched.Start(); err != nil {
 			log.Printf("gagal menyalakan siklus otomatis: %v", err)
 		} else {
-			log.Printf("siklus otomatis aktif setiap %d menit (cap %d, jobs %d)", cfg.IntervalMinutes, cfg.Cap, cfg.Jobs)
+			if cfg.ScheduleMode == "daily" {
+				log.Printf("jadwal scrape harian %s %s; uji berkala tiap %d jam (cap %d, jobs %d)", cfg.DailyAt, cfg.ScheduleTimezone, cfg.TestIntervalHours, cfg.Cap, cfg.Jobs)
+			} else {
+				log.Printf("siklus otomatis aktif setiap %d menit (cap %d, jobs %d)", cfg.IntervalMinutes, cfg.Cap, cfg.Jobs)
+			}
 		}
 	} else if *flagScrapeNow {
 		if err := sched.TriggerNow(); err != nil {
