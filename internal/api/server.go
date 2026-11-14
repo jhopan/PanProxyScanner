@@ -494,6 +494,12 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 		}
 	}
 	if len(rows) == 0 {
+		if !since.IsZero() {
+			// Push delta: belum ada baris yang berubah sejak push terakhir. Ini hasil normal,
+			// bukan kegagalan, jadi status sinkronisasi tidak diisi error.
+			s.recordSync("push delta: tidak ada perubahan", nil)
+			return 0, skippedEdge, nil
+		}
 		if cfg.PushRequireTLS {
 			return 0, skippedEdge, fmt.Errorf("tidak ada proxy hidup yang lolos uji TLS 443 & segar (matikan push_require_tls kalau ingin mengirim proxy HTTP saja)")
 		}

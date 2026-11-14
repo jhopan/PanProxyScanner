@@ -554,8 +554,9 @@ func (s *Store) List(f Filter) ([]Proxy, error) {
 		args = append(args, f.MinSources)
 	}
 	if !f.Since.IsZero() {
+		// last_checked disimpan sebagai epoch detik (Unix), sama seperti filter FreshMinutes.
 		where = append(where, "last_checked > ?")
-		args = append(args, f.Since.UTC().Format(time.RFC3339))
+		args = append(args, f.Since.Unix())
 	}
 	if f.FreshMinutes > 0 {
 		where = append(where, "last_checked >= ?")
