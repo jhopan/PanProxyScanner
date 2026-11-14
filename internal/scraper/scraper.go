@@ -869,31 +869,45 @@ func (s *Scheduler) Start() error {
 	s.running = true
 	s.mu.Unlock()
 
-	// Catch-up: kalau hari ini (zona pengaturan) belum ada scrape penuh, jalankan sekarang.
-	// Proses yang mati semalaman tidak lagi kehilangan jadwal hariannya.
-	if s.needsDailyRun() {
-		log.Printf("scrape harian hari ini belum jalan — menjalankan sekarang (catch-up)")
-		s.markDailyRun()
-		s.RunScheduled(false)
-	}
-
+	// Catch-up dijalankan di dalam goroutine jadwal, bukan di sini: Start() tidak boleh
+	// menunggu satu pipeline penuh (bisa berjam-jam) sebelum proses dianggap menyala.
 	go func() {
 		// Jadwal 1: Scrape semua sumber — harian pada jam di zona waktu pengaturan, atau interval.
 		go func() {
 			if cfg.ScheduleMode == "daily" {
+				// Catch-up + percobaan ulang ada di loop ini. Penanda harian hanya ditulis
+				// setelah run sukses (lihat RunScheduled), jadi selama hari ini belum bertanda
+				// loop mencoba lagi tiap dailyRetryDelay — bukan menunggu 24 jam.
+				first := true
 				for {
 					cur := s.Config()
-					next := settings.NextDailyIn(cur.DailyAt, time.Now(), cur.Location())
-					log.Printf("jadwal scrape: berikutnya %s (zona %s)", next.Format("2006-01-02 15:04 MST"), cur.ScheduleTimezone)
-					timer := time.NewTimer(time.Until(next))
-					select {
-					case <-ctx.Done():
-						timer.Stop()
-						return
-					case <-timer.C:
-						s.markDailyRun()
-						s.RunScheduled(false)
+					var wait time.Duration
+					if first && s.needsDailyRun() {
+						// Percobaan pertama setelah start dijalankan segera, tanpa menunggu
+						// jam jadwal: proses yang mati semalaman tidak kehilangan harinya.
+						log.Printf("scrape harian hari ini belum jalan — menjalankan sekarang (catch-up)")
+					} else {
+						var retry bool
+						wait, retry = s.dailyWait(cur)
+						if retry {
+							log.Printf("scrape harian belum berhasil — percobaan ulang dalam %s", wait)
+						} else {
+							log.Printf("jadwal scrape: berikutnya %s (zona %s)", time.Now().Add(wait).Format("2006-01-02 15:04 MST"), cur.ScheduleTimezone)
+						}
 					}
+					first = false
+					if wait > 0 {
+						timer := time.NewTimer(wait)
+						select {
+						case <-ctx.Done():
+							timer.Stop()
+							return
+						case <-timer.C:
+						}
+					} else if ctx.Err() != nil {
+						return
+					}
+					s.RunScheduled(false)
 				}
 			}
 			s.RunScheduled(false)
@@ -933,6 +947,10 @@ func (s *Scheduler) Start() error {
 
 // RunScheduled menjalankan pekerjaan sesuai jadwal: pipeline penuh kalau diaktifkan,
 // atau satu siklus scraping biasa.
+//
+// Penanda scrape harian hanya ditulis kalau run-nya benar-benar berhasil: kegagalan pipeline
+// (termasuk "pipeline lain sedang berjalan") membuat hari itu tetap dianggap belum selesai,
+// sehingga loop harian mencobanya lagi setelah dailyRetryDelay.
 func (s *Scheduler) RunScheduled(testOnly bool) {
 	cfg := s.Config()
 	// Catat waktu jalan juga untuk jalur pipeline: tanpa ini `LastRun()` tetap nol dan UI
@@ -958,10 +976,19 @@ func (s *Scheduler) RunScheduled(testOnly bool) {
 	}
 	if cfg.PipelineEnabled && s.Pipeline != nil {
 		if err := s.Pipeline(false); err != nil {
+			// Jangan tandai: jadwal yang gagal harus dicoba lagi, bukan dianggap selesai
+			// sampai besok.
 			log.Printf("pipeline gagal: %v", err)
+			return
 		}
+		s.markDailyRun()
 		return
 	}
+	// Jalur scrape biasa memakai Runner.Start yang asinkron: di titik ini kita hanya tahu
+	// siklus diterima atau ditolak, bukan hasil akhirnya, jadi penanda tetap ditulis saat
+	// memicu (perilaku lama). Tanpa itu jadwal akan memicu ulang terus karena tidak ada cara
+	// mengetahui keberhasilan dari sini.
+	s.markDailyRun()
 	s.trigger()
 }
 
@@ -1008,6 +1035,22 @@ func report(sink Sink, fn func(*Progress)) {
 	if sink != nil {
 		sink.Update(fn)
 	}
+}
+
+// dailyRetryDelay adalah jeda percobaan ulang scrape penuh harian yang belum berhasil.
+// Tanpa ini satu kegagalan (mis. pipeline lain sedang berjalan) membuat hari itu kehilangan
+// jadwalnya sampai jadwal berikutnya 24 jam kemudian.
+const dailyRetryDelay = 15 * time.Minute
+
+// dailyWait menghitung lama menunggu sebelum percobaan scrape penuh berikutnya untuk mode
+// harian. `retry` menandakan penantian itu percobaan ulang karena penanda hari ini belum
+// tertulis; kalau jadwal harian berikutnya lebih dekat, jadwal itulah yang dipakai.
+func (s *Scheduler) dailyWait(cfg settings.Settings) (wait time.Duration, retry bool) {
+	untilNext := time.Until(settings.NextDailyIn(cfg.DailyAt, time.Now(), cfg.Location()))
+	if !s.needsDailyRun() || untilNext <= dailyRetryDelay {
+		return untilNext, false
+	}
+	return dailyRetryDelay, true
 }
 
 // needsDailyRun melaporkan apakah scrape penuh untuk hari ini (zona jadwal) belum dijalankan.

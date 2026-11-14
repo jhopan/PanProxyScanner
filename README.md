@@ -294,7 +294,7 @@ Menu **Supabase** di panel:
 | TLS | **hanya menaikkan yang terbukti sanggup TLS 443**; sisanya justru diturunkan |
 
 Status sinkronisasi menuliskan semuanya, mis.:
-`push 180 baris (naik 49, turun 131, wajib TLS: true, verdict segar ≤ 90 menit, 30 ditahan (baru 1× berhasil), 2 dilewati (exit IP sama), kolom tls_ok/alt_ok/exit_ip ikut dikirim)`.
+`push 180 baris (naik 49, turun 131, wajib TLS: false, verdict segar ≤ 90 menit, 30 ditahan (baru 1× berhasil), 2 dilewati (exit IP sama), kolom tls_ok/alt_ok/exit_ip ikut dikirim)`.
 
 Angka pengukuran: dari 154 proxy yang lolos uji HTTP, **51 sanggup tunnel TLS 443 (33%)** dan 37
 sanggup port non-standar. Sisa dua pertiga kalau dibiarkan aktif akan menjadi konfigurasi
@@ -305,7 +305,10 @@ VLESS yang mati di sisi pengguna.
 Proxy mati mengosongkan `ping_ms`.
 
 Kalau kolom bukti (`tls_ok`, `alt_ok`, `exit_ip`) belum ada di tabel, `push` tetap berjalan:
-kolom itu dilepas otomatis dan dicatat di status sinkronisasi. Setelah
+kolom itu dilepas otomatis dan dicatat di status sinkronisasi. Hal yang sama berlaku untuk kolom
+bukti host (`tunnel_host_ok`/`tunnel_host_ms`/`tunnel_host_checked`): kalau ditolak, hanya
+kelompok itu yang dilepas — kolom bukti lama tidak ikut hilang. Pembuangan kolom hanya dipicu error
+kolom sungguhan (HTTP 400 + `PGRST204`/`42703`); error jaringan/5xx tidak mengubah status kolom. Setelah
 `docs/supabase-policies.sql` dijalankan di Supabase, kolom bukti langsung ikut terkirim tanpa
 perlu restart.
 
@@ -339,12 +342,19 @@ verifikasi dari browser.
 - **Scrape harian** pada `daily_at` di zona `schedule_timezone` (bawaan `08:00` `Asia/Makassar` =
   00:00 UTC): pipeline penuh — scrape semua sumber, verifikasi, push ke Supabase.
 - **Penanda harian**: kalau hari ini scrape penuh belum jalan (mis. server mati saat 08:00),
-  pipeline menjalankannya begitu service hidup (catch-up; disimpan di tabel `meta`).
+  pipeline menjalankannya begitu service hidup (catch-up; disimpan di tabel `meta`). Penanda
+  ditulis **setelah** run penuh benar-benar sukses, dan kegagalan dijadwalkan ulang tiap 15 menit —
+  jadi satu kegagalan tidak menghilangkan jadwal hari itu, dan restart berkali-kali tidak memicu
+  scrape penuh berkali-kali.
 - **Cek lokal** tiap `test_interval_hours` jam (bawaan 6, jatuh pada kelipatan dari 00:00 UTC):
   hanya refresh baris tersimpan + pass target negara, tanpa mengambil sumber, lalu **push delta**
   (hanya baris yang berubah sejak push terakhir).
 - **Yang dikirim ke Supabase**: semua proxy yang bisa dipakai (TLS maupun non-TLS), dengan
-  `tls_ok`/`alt_ok`/`exit_ip` sebagai penanda kualitas; baris yang di edge terbukti mati ditahan.
+  `tls_ok`/`alt_ok`/`exit_ip` sebagai penanda kualitas, plus bukti vantage host
+  (`tunnel_host_ok`/`tunnel_host_ms`/`tunnel_host_checked`) yang berarti "pemeriksaan nyata lewat
+  proxy ini dari mesin scanner". Baris yang di edge terbukti mati tetap ditahan. Kolom bukti host
+  ditambahkan lewat `cfvpn-hub/sql/2026-11-14-tunnel-host-columns.sql` (untuk project lama:
+  `docs/supabase-policies.sql`); kalau belum dijalankan, push tetap jalan tanpa kolom itu.
 - **Target per negara** `country_targets` (contoh `{"ID": 5, "SG": 3}`) mengatur **urutan**
   verifikasi: negara yang stok TLS-nya di bawah target didahulukan. Semua negara tetap
   di-scrape, dan setiap baris punya kategori `country`.

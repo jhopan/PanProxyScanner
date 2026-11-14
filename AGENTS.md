@@ -70,8 +70,11 @@ go build -ldflags "-X main.version=v0.1.0" -o panproxyscanner.exe .
   di-scrape, dan setiap baris tetap dikategorikan lewat kolom `country`.
 - **Penanda scrape harian**: tanggal scrape penuh terakhir disimpan di tabel `meta`
   (`last_full_scrape`). Saat proses start, kalau hari ini (zona jadwal) belum ada scrape penuh,
-  pipeline langsung dijalankan (catch-up) lalu penandanya diperbarui. Jadi minimal satu scrape
-  penuh per hari tetap terjadi walau service sempat mati.
+  pipeline langsung dijalankan (catch-up). Penanda **hanya ditulis setelah run penuh sukses**, dan
+  kalau gagal (termasuk "pipeline lain sedang berjalan") loop menjadwalkan percobaan ulang tiap 15
+  menit — bukan menunggu 24 jam. Catch-up berjalan di goroutine jadwal, jadi `Start()` tidak lagi
+  menunggu satu pipeline penuh. Jalur scrape biasa (`Pipeline == nil`) tetap menandai saat memicu,
+  karena `runner.Start` asinkron sehingga hasil akhirnya tidak diketahui di sana.
 - **Push hanya yang berubah**: waktu push terakhir disimpan di `meta.last_push_at`; push dari
   jadwal 6 jam / auto-push hanya mengirim baris yang `last_checked`-nya lebih baru dari titik
   itu (`Filter.Since`). Pipeline harian tetap mengirim menyeluruh (Since kosong).
@@ -79,6 +82,16 @@ go build -ldflags "-X main.version=v0.1.0" -o panproxyscanner.exe .
   baris hidup (TLS maupun non-TLS) naik ke `is_active=true`, dan `tls_ok` hanya menjadi penanda
   kualitas yang dipakai panel/worker untuk memilih. Aturan lama ("hanya TLS yang boleh aktif")
   diganti karena klien bisa memakai config NTLS; bukti `tls_ok/alt_ok/exit_ip` tetap dikirim.
+- **Bukti vantage host dikirim ke Supabase**: setiap baris yang dipush membawa
+  `tunnel_host_ok` (pemeriksaan nyata lewat proxy itu dari mesin scanner), `tunnel_host_ms`, dan
+  `tunnel_host_checked`. Kolom itu milik cfvpn-hub (`sql/2026-11-14-tunnel-host-columns.sql`,
+  dijalankan manusia) dan TIDAK boleh tertukar dengan `tunnel_ok`/`tunnel_ms`/`tunnel_checked`
+  yang edge-only (diisi cron CFVPN); scanner hanya membaca `tunnel_ok` sebagai penahan
+  (`PullEdgeVerdicts`). Kalau kolomnya belum ada, push tetap sukses tanpa kolom itu.
+- **Kegagalan push dibedakan**: hanya HTTP 400 dengan kode PostgREST `PGRST204` / SQLSTATE
+  `42703` yang dianggap "kolom belum ada" (lalu kelompok kolom host dilepas, kelompok bukti lama
+  dipertahankan). Error lain (5xx, jaringan, 400 kode lain) dikembalikan apa adanya **tanpa**
+  mengubah state kolom, supaya gangguan sesaat tidak membuat bukti berhenti terkirim.
 - **Dua jadwal**: `schedule_mode=daily` + `daily_at` pada `schedule_timezone` (bawaan 08:00
   Asia/Makassar = 00:00 UTC) menjalankan pipeline penuh (scrape semua sumber → push).
   `test_interval_hours` (bawaan 6) menjalankan **tes berkala** pada kelipatan jam dari 00:00

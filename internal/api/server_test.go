@@ -124,3 +124,257 @@ func TestPushSinceSendsOnlyChanged(t *testing.T) {
 		t.Fatalf("penanda push harus tersimpan: %v", err)
 	}
 }
+
+// pushTestStore membuka database sementara berisi satu proxy hidup yang sudah dua kali
+// berhasil (pool menahan proxy yang baru sekali lolos, minOK=2 di pushToSupabase).
+func pushTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "p.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	for range 2 {
+		if err := st.RecordAlive("1.1.1.1", 1080, "socks5", "ID", 900, 2, true, false, "203.0.113.1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return st
+}
+
+// hostEvidenceKeys adalah kolom bukti vantage host scanner yang harus ikut dikirim push.
+var hostEvidenceKeys = []string{"tunnel_host_ok", "tunnel_host_ms", "tunnel_host_checked"}
+
+// edgeOnlyKeys adalah kolom verdict edge (diisi cron panel CFVPN): scanner hanya membacanya
+// (PullEdgeVerdicts), jadi tidak boleh pernah muncul di payload push.
+var edgeOnlyKeys = []string{"tunnel_ok", "tunnel_ms", "tunnel_checked"}
+
+// Payload push harus memuat bukti vantage host: tunnel nyata lewat proxy itu sudah lulus
+// dari mesin scanner, jadi baris yang naik membawa ok/ms/waktu cek — penanda bukti untuk
+// baris non-TLS yang tidak punya tls_ok/alt_ok.
+func TestPushSendsHostTunnelEvidence(t *testing.T) {
+	st := pushTestStore(t)
+
+	var mu sync.Mutex
+	var payload []map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var rows []map[string]any
+		_ = json.Unmarshal(body, &rows)
+		mu.Lock()
+		payload = append(payload, rows...)
+		mu.Unlock()
+		w.Header().Set("Content-Range", "0-0/0")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer ts.Close()
+
+	client := supabase.New(ts.URL, "kunci-uji", "proxy_pool")
+	srv := &Server{store: st}
+	sent, _, err := srv.pushToSupabase(context.Background(), client, settings.Default(), 100, nil, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("push ke stub harus sukses: %v", err)
+	}
+	if sent == 0 {
+		t.Fatal("push harus mengirim baris")
+	}
+	if !client.HostEvidenceColumns() {
+		t.Fatal("stub menerima kolom tunnel_host_*: HostEvidenceColumns harus true")
+	}
+
+	mu.Lock()
+	recorded := append([]map[string]any(nil), payload...)
+	mu.Unlock()
+	if len(recorded) == 0 {
+		t.Fatal("tidak ada payload tercatat")
+	}
+	for _, row := range recorded {
+		ok, isBool := row["tunnel_host_ok"].(bool)
+		if !isBool || !ok {
+			t.Fatalf("tunnel_host_ok harus true (tunnel nyata lulus dari host scanner), dapat %v", row["tunnel_host_ok"])
+		}
+		ms, isNum := row["tunnel_host_ms"].(float64)
+		if !isNum || ms <= 0 {
+			t.Fatalf("tunnel_host_ms harus latensi milidetik, dapat %v", row["tunnel_host_ms"])
+		}
+		checked, isStr := row["tunnel_host_checked"].(string)
+		if !isStr {
+			t.Fatalf("tunnel_host_checked harus ada, dapat %v", row["tunnel_host_checked"])
+		}
+		if _, err := time.Parse(time.RFC3339, checked); err != nil {
+			t.Fatalf("tunnel_host_checked harus RFC3339, dapat %q: %v", checked, err)
+		}
+		for _, key := range edgeOnlyKeys {
+			if _, ok := row[key]; ok {
+				t.Fatalf("%s milik edge (cron panel) — scanner tidak boleh menulisnya", key)
+			}
+		}
+	}
+}
+
+// Kalau tabel belum punya kolom tunnel_host_* (SQL panel belum dijalankan), PostgREST
+// menolak payload dengan 400 + PGRST204 atau SQLSTATE 42703: push harus tetap berhasil tanpa
+// kolom itu, statusnya diingat, dan kolom bukti lama (tls_ok/alt_ok/exit_ip) tidak ikut hilang.
+func TestPushToleratesMissingHostEvidenceColumns(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{
+			name: "PGRST204 kolom tidak ada di schema cache",
+			body: `{"code":"PGRST204","message":"Could not find the 'tunnel_host_ok' column of 'proxy_pool' in the schema cache"}`,
+		},
+		{
+			name: "SQLSTATE 42703 undefined column",
+			body: `{"code":"42703","message":"column \"tunnel_host_ok\" does not exist","details":null}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := pushTestStore(t)
+
+			var mu sync.Mutex
+			var accepted []map[string]any
+			rejected := 0
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				var rows []map[string]any
+				_ = json.Unmarshal(body, &rows)
+				offending := false
+				for _, row := range rows {
+					for _, key := range hostEvidenceKeys {
+						if _, ok := row[key]; ok {
+							offending = true
+						}
+					}
+				}
+				mu.Lock()
+				if offending {
+					rejected++
+				} else {
+					accepted = append(accepted, rows...)
+				}
+				mu.Unlock()
+				if offending {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(tc.body))
+					return
+				}
+				w.Header().Set("Content-Range", "0-0/0")
+				w.WriteHeader(http.StatusCreated)
+			}))
+			defer ts.Close()
+
+			client := supabase.New(ts.URL, "kunci-uji", "proxy_pool")
+			srv := &Server{store: st}
+			sent, _, err := srv.pushToSupabase(context.Background(), client, settings.Default(), 100, nil, time.Now().Add(-24*time.Hour))
+			if err != nil {
+				t.Fatalf("penolakan kolom tunnel_host_* bukan kegagalan push: %v", err)
+			}
+			if sent == 0 {
+				t.Fatal("push harus tetap mengirim baris (tanpa kolom tunnel_host_*)")
+			}
+			if client.HostEvidenceColumns() {
+				t.Fatal("kolom tunnel_host_* pernah ditolak: statusnya harus diingat sebagai tidak ada")
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if rejected == 0 {
+				t.Fatal("stub harus menolak percobaan pertama yang memuat kolom tunnel_host_*")
+			}
+			if len(accepted) == 0 {
+				t.Fatal("push ulang tanpa kolom tunnel_host_* harus sampai ke tabel")
+			}
+			for _, row := range accepted {
+				for _, key := range hostEvidenceKeys {
+					if _, ok := row[key]; ok {
+						t.Fatalf("payload yang diterima tidak boleh memuat %s", key)
+					}
+				}
+				if _, ok := row["tls_ok"]; !ok {
+					t.Fatal("kolom bukti tls_ok harus tetap terkirim walau tunnel_host_* ditolak")
+				}
+			}
+		})
+	}
+}
+
+// Kegagalan yang BUKAN soal kolom (5xx, atau 400 dengan kode lain) tidak boleh membuat kolom
+// bukti dilepas dan state-nya diingat: satu gangguan sesaat jangan sampai mematikan kolom
+// tunnel_host_* / tls_ok sampai proses scanner restart. Push berikutnya ke stub yang sama
+// harus tetap mengirim kolom host.
+func TestPushKeepsEvidenceColumnsOnNonColumnError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "500 internal error", status: http.StatusInternalServerError, body: `{"code":"XX000","message":"internal error"}`},
+		{name: "400 kode lain (PGRST102)", status: http.StatusBadRequest, body: `{"code":"PGRST102","message":"All object keys must match"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := pushTestStore(t)
+
+			var mu sync.Mutex
+			fail := true
+			posts, hostSeen := 0, 0
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				var rows []map[string]any
+				_ = json.Unmarshal(body, &rows)
+				if r.Method != http.MethodPost {
+					w.Header().Set("Content-Range", "0-0/0")
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+				mu.Lock()
+				failing := fail
+				posts++
+				if !failing {
+					for _, row := range rows {
+						if _, ok := row["tunnel_host_ok"]; ok {
+							hostSeen++
+						}
+					}
+				}
+				mu.Unlock()
+				if failing {
+					w.WriteHeader(tc.status)
+					_, _ = w.Write([]byte(tc.body))
+					return
+				}
+				w.Header().Set("Content-Range", "0-0/0")
+				w.WriteHeader(http.StatusCreated)
+			}))
+			defer ts.Close()
+
+			client := supabase.New(ts.URL, "kunci-uji", "proxy_pool")
+			srv := &Server{store: st}
+			if _, _, err := srv.pushToSupabase(context.Background(), client, settings.Default(), 100, nil, time.Now().Add(-24*time.Hour)); err == nil {
+				t.Fatalf("stub membalas %d: push harus melaporkan error", tc.status)
+			}
+			mu.Lock()
+			tries := posts
+			mu.Unlock()
+			if tries != 1 {
+				t.Fatalf("error non-kolom tidak boleh memicu push ulang, dapat %d percobaan", tries)
+			}
+
+			mu.Lock()
+			fail = false
+			mu.Unlock()
+			sent, _, err := srv.pushToSupabase(context.Background(), client, settings.Default(), 100, nil, time.Now().Add(-24*time.Hour))
+			if err != nil {
+				t.Fatalf("push berikutnya harus sukses: %v", err)
+			}
+			if sent == 0 {
+				t.Fatal("push berikutnya harus mengirim baris")
+			}
+			mu.Lock()
+			seen := hostSeen
+			mu.Unlock()
+			if seen == 0 {
+				t.Fatal("setelah error non-kolom, push berikutnya harus tetap mengirim tunnel_host_ok")
+			}
+			if !client.HostEvidenceColumns() {
+				t.Fatal("kolom tunnel_host_* masih dipakai: HostEvidenceColumns harus true")
+			}
+		})
+	}
+}

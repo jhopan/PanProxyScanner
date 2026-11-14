@@ -418,6 +418,17 @@ func exitKey(exitIP string) string {
 	return ip.String()
 }
 
+// hostCheckedAt mengubah waktu cek lokal (unix detik, kolom `last_checked` di database
+// scanner) menjadi RFC3339 seperti `last_checked` yang dikirim ke Supabase, jadi
+// `tunnel_host_checked` berisi waktu pemeriksaan tunnel itu sendiri — bukan waktu push.
+// Nilai yang tidak diketahui (≤ 0) diganti waktu sekarang supaya kolomnya tetap terisi.
+func hostCheckedAt(unixSec int64) time.Time {
+	if unixSec <= 0 {
+		return time.Now().UTC()
+	}
+	return time.Unix(unixSec, 0).UTC()
+}
+
 // pushToSupabase menyinkronkan keputusan verifikasi ke tabel Supabase.
 //
 // Dua arah, karena `is_active` di tabel itu satu-satunya penentu apa yang dipakai panel:
@@ -478,7 +489,8 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 		rows = append(rows, supabase.Row{
 			IP: p.IP, Port: strconv.Itoa(p.Port), Country: p.Country,
 			IsActive: true, LastChecked: now, Ping: p.PingMS,
-		}.EvidenceRow(p.TLS, p.AltOK, p.ExitIP))
+		}.EvidenceRow(p.TLS, p.AltOK, p.ExitIP).
+			HostEvidence(p.Alive, p.PingMS, hostCheckedAt(p.LastChecked)))
 	}
 	demoted := 0
 	if cfg.PushRequireTLS {
@@ -489,7 +501,8 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 			rows = append(rows, supabase.Row{
 				IP: p.IP, Port: strconv.Itoa(p.Port), Country: p.Country,
 				IsActive: false, LastChecked: now, Ping: p.PingMS,
-			}.EvidenceRow(false, p.AltOK, p.ExitIP))
+			}.EvidenceRow(false, p.AltOK, p.ExitIP).
+				HostEvidence(p.Alive, p.PingMS, hostCheckedAt(p.LastChecked)))
 			demoted++
 		}
 	}
@@ -526,6 +539,11 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 		note += ", kolom tls_ok/alt_ok/exit_ip ikut dikirim"
 	} else {
 		note += ", kolom bukti belum ada di tabel → jalankan docs/supabase-policies.sql"
+	}
+	if client.HostEvidenceColumns() {
+		note += ", kolom tunnel_host_ok/tunnel_host_ms/tunnel_host_checked ikut dikirim"
+	} else {
+		note += ", kolom bukti vantage host belum ada di tabel → jalankan docs/supabase-policies.sql"
 	}
 	s.recordSync(note+")", err)
 	if err == nil {
@@ -579,7 +597,8 @@ func (s supabaseSink) UpdateVerdicts(ctx context.Context, verdicts []scraper.Ver
 			alive = append(alive, supabase.Row{
 				IP: v.Row.IP, Port: v.Row.Port, Country: v.Row.Country,
 				IsActive: active, LastChecked: now, Ping: v.PingMS,
-			}.EvidenceRow(v.TLS, v.AltOK, v.ExitIP))
+			}.EvidenceRow(v.TLS, v.AltOK, v.ExitIP).
+				HostEvidence(v.Alive, v.PingMS, time.Now().UTC()))
 		} else {
 			deadIDs = append(deadIDs, v.Row.ID)
 		}

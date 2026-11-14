@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,6 +37,15 @@ type Row struct {
 	TLSOK    *bool   `json:"tls_ok,omitempty"`
 	AltOK    *bool   `json:"alt_ok,omitempty"`
 	ExitIP   *string `json:"exit_ip,omitempty"`
+	// Bukti vantage HOST SCANNER: pemeriksaan tunnel nyata lewat proxy ini dijalankan dari
+	// mesin scanner (`tunnel_host_ok`), lengkap dengan latensi (milidetik) dan waktunya.
+	// Ini penanda bukti untuk baris non-TLS (mis. HTTP CONNECT) yang tidak punya tls_ok/
+	// alt_ok, dan bukan verdict edge: `tunnel_ok` di atas tetap milik cron panel (hanya
+	// dibaca dari sini). Kolom terpisah karena SQL-nya bisa belum dijalankan walau kolom
+	// bukti di atas sudah ada — lihat docs/supabase-policies.sql.
+	HostOK      *bool   `json:"tunnel_host_ok,omitempty"`
+	HostMS      *int    `json:"tunnel_host_ms,omitempty"`
+	HostChecked *string `json:"tunnel_host_checked,omitempty"`
 }
 
 // EvidenceRow melengkapi baris dengan bukti verifikasi (dipakai kalau kolomnya sudah ada).
@@ -43,6 +53,18 @@ func (r Row) EvidenceRow(tlsOK, altOK bool, exitIP string) Row {
 	r.TLSOK, r.AltOK = &tlsOK, &altOK
 	if exitIP != "" {
 		r.ExitIP = &exitIP
+	}
+	return r
+}
+
+// HostEvidence melengkapi baris dengan bukti vantage host scanner: pemeriksaan tunnel nyata
+// lewat proxy ini dari mesin scanner (`ok`), latensinya dalam milidetik, dan waktu cek
+// terakhir (format RFC3339, sama seperti `last_checked` yang sudah dikirim).
+func (r Row) HostEvidence(ok bool, ms int, checked time.Time) Row {
+	r.HostOK, r.HostMS = &ok, &ms
+	if !checked.IsZero() {
+		ts := checked.UTC().Format(time.RFC3339)
+		r.HostChecked = &ts
 	}
 	return r
 }
@@ -56,6 +78,10 @@ type Client struct {
 
 	mu           sync.Mutex
 	evidenceCols int // 0 = belum diketahui, 1 = ada, -1 = tidak ada
+	// hostCols menyimpan keadaan kolom tunnel_host_* secara terpisah: SQL panel bisa sudah
+	// memuat tls_ok/alt_ok/exit_ip tetapi belum kolom bukti vantage host, dan sebaliknya
+	// tidak boleh menghapus bukti yang sudah jalan.
+	hostCols int // 0 = belum diketahui, 1 = ada, -1 = tidak ada
 }
 
 // New membuat klien. `table` default "proxy_pool" (tabel yang dipakai panel).
@@ -115,6 +141,17 @@ func (c *Client) do(ctx context.Context, method, url string, body any, extra map
 	return resp, data, nil
 }
 
+// httpError adalah kegagalan HTTP dari PostgREST. Dibawa sebagai tipe supaya pemanggil bisa
+// membedakan penolakan kolom dari gangguan lain (jaringan, 5xx, RLS) tanpa menebak dari teks
+// pesan. Pesannya sama persis dengan yang dikembalikan errorFrom sebelumnya.
+type httpError struct {
+	status int
+	code   string // kode PostgREST atau SQLSTATE dari body, kalau ada
+	msg    string
+}
+
+func (e *httpError) Error() string { return e.msg }
+
 func errorFrom(resp *http.Response, data []byte) error {
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return nil
@@ -123,7 +160,42 @@ func errorFrom(resp *http.Response, data []byte) error {
 	if len(snippet) > 200 {
 		snippet = snippet[:200]
 	}
-	return fmt.Errorf("supabase HTTP %d: %s", resp.StatusCode, snippet)
+	return &httpError{
+		status: resp.StatusCode,
+		code:   errorCode(data),
+		msg:    fmt.Sprintf("supabase HTTP %d: %s", resp.StatusCode, snippet),
+	}
+}
+
+// errorCode mengambil kode PostgREST/SQLSTATE dari body error. PostgREST membalas JSON
+// ({"code":"PGRST204","message":...}), tetapi sebagian proxy meneruskan teks biasa — karena
+// itu ada fallback pencarian kode di badan respons.
+func errorCode(data []byte) string {
+	var body struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(data, &body) == nil && body.Code != "" {
+		return body.Code
+	}
+	text := string(data)
+	for _, code := range []string{"PGRST204", "42703"} {
+		if strings.Contains(text, code) {
+			return code
+		}
+	}
+	return ""
+}
+
+// isMissingColumnErr menandakan kegagalan itu karena kolom yang dikirim belum ada di tabel:
+// HTTP 400 + PostgREST `PGRST204` (kolom tidak ada di schema cache) atau SQLSTATE `42703`
+// (undefined_column). Hanya error seperti ini yang boleh membuat kolom bukti dilepas —
+// 5xx, RLS, atau gangguan jaringan sesaat tidak boleh mematikan kolom bukti.
+func isMissingColumnErr(err error) bool {
+	var httpErr *httpError
+	if !errors.As(err, &httpErr) || httpErr.status != http.StatusBadRequest {
+		return false
+	}
+	return httpErr.code == "PGRST204" || httpErr.code == "42703"
 }
 
 // Test memeriksa koneksi dan mengembalikan jumlah baris (total & aktif).
@@ -197,11 +269,15 @@ func (c *Client) Pull(ctx context.Context, limit, offset int, staleBefore int64,
 // Upsert menyisipkan atau memperbarui baris berdasarkan pasangan (ip, port) — kolom itu
 // unik di tabel proxy_pool, jadi aman dipakai berulang.
 //
-// Kalau baris membawa bukti verifikasi (`tls_ok`/`alt_ok`/`exit_ip`) tetapi kolomnya belum
-// ada di tabel, PostgREST membalas 400 dan seluruh push gagal. Karena itu kegagalan seperti
-// itu ditangani: kolom bukti dilepas, push diulang, dan hasilnya dicatat supaya percobaan
-// berikutnya tidak membuang request. Setelah `docs/supabase-policies.sql` dijalankan,
-// kolom bukti langsung ikut terkirim tanpa perlu restart.
+// Kalau baris membawa bukti verifikasi (`tls_ok`/`alt_ok`/`exit_ip`) atau bukti vantage host
+// (`tunnel_host_ok`/`tunnel_host_ms`/`tunnel_host_checked`) tetapi kolomnya belum ada di
+// tabel, PostgREST membalas 400 + `PGRST204` dan seluruh push gagal. Hanya penolakan kolom
+// seperti itu yang ditangani: kelompok kolom yang ditolak dilepas, push diulang, dan hasilnya
+// dicatat supaya percobaan berikutnya tidak membuang request. Kedua kelompok dilepas terpisah
+// supaya kolom bukti yang sudah jalan tidak ikut hilang hanya karena kolom baru belum
+// dijalankan SQL-nya. Kegagalan lain (jaringan, 5xx, RLS) dikembalikan apa adanya tanpa
+// mengubah state kolom. Setelah `docs/supabase-policies.sql` dijalankan, kolomnya langsung
+// ikut terkirim tanpa perlu restart.
 func (c *Client) Upsert(ctx context.Context, rows []Row) (int, error) {
 	if len(rows) == 0 {
 		return 0, nil
@@ -212,16 +288,38 @@ func (c *Client) Upsert(ctx context.Context, rows []Row) (int, error) {
 	if c.evidenceState() < 0 {
 		rows = stripEvidence(rows)
 	}
+	if c.hostState() < 0 {
+		rows = stripHostEvidence(rows)
+	}
 	sent, err := c.upsertChunks(ctx, rows)
-	if err == nil || !hasEvidence(rows) {
-		if err == nil {
-			c.setEvidenceState(1)
+	if err == nil {
+		c.rememberColumns(rows)
+		return sent, nil
+	}
+	// Hanya penolakan kolom yang boleh membuat kolom bukti dilepas dan state-nya diingat.
+	// Gangguan lain (jaringan, 5xx, RLS) dikembalikan apa adanya supaya satu error sesaat
+	// tidak mematikan kolom bukti sampai proses restart.
+	if !isMissingColumnErr(err) {
+		return sent, err
+	}
+	// Buang bukti vantage host lebih dulu (kolom itu yang paling baru ditambahkan), lalu
+	// seluruh kolom bukti, dan ingat hasil tiap percobaan.
+	if hasHostEvidence(rows) {
+		c.setHostState(-1)
+		rows = stripHostEvidence(rows)
+		if sent, err = c.upsertChunks(ctx, rows); err == nil {
+			c.rememberColumns(rows)
+			return sent, nil
 		}
+		if !isMissingColumnErr(err) {
+			return sent, err
+		}
+	}
+	if !hasEvidence(rows) {
 		return sent, err
 	}
 	c.setEvidenceState(-1)
-	sent, err = c.upsertChunks(ctx, stripEvidence(rows))
-	return sent, err
+	return c.upsertChunks(ctx, stripEvidence(rows))
 }
 
 func (c *Client) upsertChunks(ctx context.Context, rows []Row) (int, error) {
@@ -246,6 +344,10 @@ func (c *Client) upsertChunks(ctx context.Context, rows []Row) (int, error) {
 // EvidenceColumns menandakan kolom bukti (tls_ok/alt_ok/exit_ip) dipakai oleh push terakhir.
 func (c *Client) EvidenceColumns() bool { return c.evidenceState() == 1 }
 
+// HostEvidenceColumns menandakan kolom bukti vantage host (tunnel_host_ok/tunnel_host_ms/
+// tunnel_host_checked) dipakai push terakhir.
+func (c *Client) HostEvidenceColumns() bool { return c.hostState() == 1 }
+
 func (c *Client) evidenceState() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -258,9 +360,41 @@ func (c *Client) setEvidenceState(state int) {
 	c.mu.Unlock()
 }
 
+func (c *Client) hostState() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hostCols
+}
+
+func (c *Client) setHostState(state int) {
+	c.mu.Lock()
+	c.hostCols = state
+	c.mu.Unlock()
+}
+
+// rememberColumns mencatat kelompok kolom mana yang benar-benar ikut terkirim dan diterima
+// tabel, supaya push berikutnya tahu kolom apa yang aman dikirim.
+func (c *Client) rememberColumns(rows []Row) {
+	if hasEvidence(rows) {
+		c.setEvidenceState(1)
+	}
+	if hasHostEvidence(rows) {
+		c.setHostState(1)
+	}
+}
+
 func hasEvidence(rows []Row) bool {
 	for _, r := range rows {
 		if r.TLSOK != nil || r.AltOK != nil || r.ExitIP != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func hasHostEvidence(rows []Row) bool {
+	for _, r := range rows {
+		if r.HostOK != nil || r.HostMS != nil || r.HostChecked != nil {
 			return true
 		}
 	}
@@ -271,6 +405,15 @@ func stripEvidence(rows []Row) []Row {
 	out := make([]Row, len(rows))
 	for i, r := range rows {
 		r.TLSOK, r.AltOK, r.ExitIP = nil, nil, nil
+		out[i] = r
+	}
+	return out
+}
+
+func stripHostEvidence(rows []Row) []Row {
+	out := make([]Row, len(rows))
+	for i, r := range rows {
+		r.HostOK, r.HostMS, r.HostChecked = nil, nil, nil
 		out[i] = r
 	}
 	return out

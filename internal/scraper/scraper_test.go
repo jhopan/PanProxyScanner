@@ -2,6 +2,7 @@ package scraper
 
 import (
 	"context"
+	"errors"
 	"github.com/jhopan/Pan-ProxyScanner/internal/settings"
 	"path/filepath"
 	"testing"
@@ -216,5 +217,51 @@ func TestNeedsDailyRun(t *testing.T) {
 	}
 	if !s.needsDailyRun() {
 		t.Fatal("penanda kemarin harus memicu scrape penuh lagi")
+	}
+}
+
+// Penanda harian hanya boleh ditulis setelah pipeline penuh sukses: kegagalan (termasuk
+// "pipeline lain sedang berjalan") harus tetap memicu percobaan berikutnya hari itu,
+// sedangkan keberhasilan menutup jadwal hari itu.
+func TestDailyMarkerOnlyAfterPipelineSuccess(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "p.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := settings.Default()
+	cfg.PipelineEnabled = true
+	s := NewScheduler(nil, cfg)
+	s.Store = st
+
+	calls := 0
+	var gotTestOnly bool
+	s.Pipeline = func(testOnly bool) error {
+		calls++
+		gotTestOnly = testOnly
+		return errors.New("pipeline lain sedang berjalan")
+	}
+	s.RunScheduled(false)
+	if calls != 1 {
+		t.Fatalf("pipeline harus dipanggil sekali, dipanggil %d kali", calls)
+	}
+	if gotTestOnly {
+		t.Fatal("jadwal penuh harus memanggil pipeline dengan testOnly=false")
+	}
+	if !s.needsDailyRun() {
+		t.Fatal("pipeline gagal tidak boleh menandai scrape harian hari ini selesai")
+	}
+
+	s.Pipeline = func(testOnly bool) error {
+		calls++
+		return nil
+	}
+	s.RunScheduled(false)
+	if calls != 2 {
+		t.Fatalf("pipeline harus dipanggil lagi, total %d", calls)
+	}
+	if s.needsDailyRun() {
+		t.Fatal("pipeline sukses harus menandai scrape harian hari ini selesai")
 	}
 }

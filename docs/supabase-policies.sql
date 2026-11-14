@@ -12,6 +12,10 @@
 --        tls_ok   = terbukti bisa tunnel TLS 443 (syarat VLESS/WebSocket ke worker)
 --        alt_ok   = terbukti bisa tunnel port non-standar (8443/2053)
 --        exit_ip  = alamat keluar sebenarnya (dibaca dari trace Cloudflare)
+--        tunnel_host_ok / tunnel_host_ms / tunnel_host_checked
+--                 = bukti dari MESIN panproxyscanner (vantage host). Terpisah dari
+--                   `tunnel_ok`/`tunnel_ms`/`tunnel_checked` yang diisi cron-worker CFVPN dari
+--                   EDGE Cloudflare; panel memakai keduanya sebagai bukti.
 --      `is_active` saja TIDAK cukup: cek HTTP dangkal bisa lolos di proxy yang tidak
 --      sanggup TLS, dan konfigurasi VLESS hasilnya mati di sisi pengguna.
 --   2. Policy RLS. Aplikasi dan panel memakai anon key, jadi:
@@ -30,6 +34,13 @@ alter table if exists public.proxy_pool
   add column if not exists alt_ok  boolean not null default false;
 alter table if exists public.proxy_pool
   add column if not exists exit_ip text;
+-- bukti vantage host (dari mesin scanner): tunnel nyata lewat proxy itu, bukan dari edge
+alter table if exists public.proxy_pool
+  add column if not exists tunnel_host_ok      boolean;
+alter table if exists public.proxy_pool
+  add column if not exists tunnel_host_ms      integer;
+alter table if exists public.proxy_pool
+  add column if not exists tunnel_host_checked timestamptz;
 
 -- indeks untuk panel: hanya baca baris aktif yang sudah terbukti TLS
 create index if not exists proxy_pool_active_tls_idx
@@ -66,4 +77,6 @@ create policy proxy_pool_delete_anon
 -- Setelah dijalankan:
 --   1. POST /api/supabase/push?limit=500   (di panproxyscanner) → mulai mengisi tls_ok/alt_ok/exit_ip
 --   2. POST /api/supabase/prune?days=1     → baru benar-benar menghapus baris mati
---   3. Panel CFVPN Hub sebaiknya membaca: is_active = true AND tls_ok = true
+--   3. Panel CFVPN Hub membaca is_active = true plus bukti: tunnel_ok = true (edge) atau
+--      tunnel_host_ok = true (host). Baris dengan tunnel_ok = false TIDAK boleh ditawarkan:
+--      worker VLESS berjalan di edge, jadi verdict edge menang atas bukti host.
