@@ -83,7 +83,7 @@ Isi dulu **URL**, **key**, dan **tabel** di menu **Supabase** (atau lewat `POST 
 |---|---|
 | `GET /api/supabase/status` | konfigurasi, jumlah baris Supabase terakhir yang diketahui, catatan sinkron terakhir. Tambah `?test=1` untuk benar-benar mengecek ke Supabase (lebih lambat) |
 | `POST /api/supabase/test` | uji koneksi: `{ "ok": true, "table": "proxy_pool", "total": 2732, "alive": 413 }` |
-| `POST /api/supabase/push?limit=500` | kirim proxy **hidup & segar** dari database lokal ke Supabase (upsert by `ip,port`); kolom yang ditulis: `ip`, `port`, `country`, `is_active=true`, `ping`, `last_checked` |
+| `POST /api/supabase/push?limit=500` | kirim proxy **hidup & segar** dari database lokal ke Supabase (upsert by `ip,port`); kolom yang ditulis: `ip`, `port`, `country`, `is_active`, `ping`, `last_checked`, bukti `tls_ok`/`alt_ok`/`exit_ip`, dan bukti vantage host `tunnel_host_ok`/`tunnel_host_ms`/`tunnel_host_checked`. Kolom bukti yang belum ada di tabel dilepas otomatis (hanya untuk error kolom: HTTP 400 `PGRST204`/`42703`), jadi push tidak gagal di project yang SQL-nya belum dijalankan |
 | `POST /api/supabase/pull-verify?limit=50&jobs=100` | tarik baris dari Supabase (yang paling lama tidak dicek), verifikasi satu per satu di sini, lalu tulis balik `is_active`/`ping`/`last_checked` — baris yang mati langsung ditandai |
 | `POST /api/supabase/prune?days=7&limit=2000` | hapus baris **mati** yang terakhir dicek lebih dari N hari. Balasan `{ "deleted": N, "kandidat_sebelumnya": M }` |
 
@@ -140,9 +140,10 @@ Supaya berjalan sendiri tanpa perintah manual, aktifkan di **Scheduler → Supab
 | `supabase_table` | nama tabel, default `proxy_pool` |
 | `supabase_auto_push` | `true` = setiap siklus selesai, proxy hidup otomatis dikirim ke Supabase |
 | `supabase_pull_limit` | jumlah baris Supabase yang ditarik & diverifikasi tiap siklus (`0` = tidak) |
+| `push delta` | tidak ada setelan terpisah: waktu push terakhir disimpan di tabel `meta` (`last_push_at`), dan push dari jadwal 6 jam / auto-push hanya mengirim baris yang `last_checked`-nya lebih baru. Kalau tidak ada yang berubah, status sinkron menulis `push delta: tidak ada perubahan` (bukan kegagalan) |
 | `probe_tls` | uji tunnel 443 dengan TLS terverifikasi (root CA sistem) untuk setiap proxy hidup |
 | `probe_alt` | uji tambahan port non-standar 8443/2053 (`alt_ok`) |
-| `push_require_tls` | `true` (default) = hanya proxy yang sanggup TLS 443 dikirim ke Supabase |
+| `push_require_tls` | `false` (default) = semua proxy yang bisa dipakai (TLS maupun HTTP/non-TLS) dikirim dengan `is_active=true` dan `tls_ok` sebagai penanda kualitas; `true` = hanya yang sanggup TLS 443 |
 | `supabase_prune_days` | hapus baris mati di Supabase yang lebih tua dari N hari saat pipeline (`0` = tidak) |
 | `auto_disable_sources` | matikan sumber yang berkali-kali tidak menghasilkan proxy |
 | `zero_streak_limit` | berapa kali kosong berturut-turut sebelum sumber dimatikan otomatis |
@@ -160,7 +161,7 @@ Satu pipeline = empat pekerjaan berurutan:
 1. **tarik dari Supabase** baris yang paling lama tidak dicek
 2. **uji satu per satu** di sini (handshake nyata) lalu tulis verdict kembali ke Supabase
 3. **scrape semua sumber** → verifikasi → simpan ke database lokal
-4. **push** proxy hidup & segar ke Supabase
+4. **push** proxy hidup & segar ke Supabase (harian: menyeluruh; jadwal 6 jam: hanya yang berubah)
 
 | Endpoint | Kegunaan |
 |---|---|
