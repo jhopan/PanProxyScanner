@@ -338,9 +338,13 @@ verifikasi dari browser.
 
 - **Scrape harian** pada `daily_at` di zona `schedule_timezone` (bawaan `08:00` `Asia/Makassar` =
   00:00 UTC): pipeline penuh — scrape semua sumber, verifikasi, push ke Supabase.
-- **Tes berkala** tiap `test_interval_hours` jam (bawaan 6, jatuh pada kelipatan dari 00:00 UTC):
-  hanya menguji ulang baris tersimpan + pull-verify + push, jadi pool terjaga tanpa memakan
-  sumber baru setiap kali.
+- **Penanda harian**: kalau hari ini scrape penuh belum jalan (mis. server mati saat 08:00),
+  pipeline menjalankannya begitu service hidup (catch-up; disimpan di tabel `meta`).
+- **Cek lokal** tiap `test_interval_hours` jam (bawaan 6, jatuh pada kelipatan dari 00:00 UTC):
+  hanya refresh baris tersimpan + pass target negara, tanpa mengambil sumber, lalu **push delta**
+  (hanya baris yang berubah sejak push terakhir).
+- **Yang dikirim ke Supabase**: semua proxy yang bisa dipakai (TLS maupun non-TLS), dengan
+  `tls_ok`/`alt_ok`/`exit_ip` sebagai penanda kualitas; baris yang di edge terbukti mati ditahan.
 - **Target per negara** `country_targets` (contoh `{"ID": 5, "SG": 3}`) mengatur **urutan**
   verifikasi: negara yang stok TLS-nya di bawah target didahulukan. Semua negara tetap
   di-scrape, dan setiap baris punya kategori `country`.
