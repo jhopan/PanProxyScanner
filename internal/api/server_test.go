@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"github.com/jhopan/Pan-ProxyScanner/internal/scraper"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -376,5 +378,75 @@ func TestPushKeepsEvidenceColumnsOnNonColumnError(t *testing.T) {
 				t.Fatal("kolom tunnel_host_* masih dipakai: HostEvidenceColumns harus true")
 			}
 		})
+	}
+}
+
+// Pipeline sinkron dipakai penjadwal: hasilnya harus mencerminkan langkah yang benar-benar jalan
+// (cek lokal saat testOnly) supaya penanda scrape harian tidak ditulis untuk run yang gagal.
+func TestRunPipelineSyncRunsLocalCheck(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "pipe1.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Default()
+	srv := &Server{store: st, runner: scraper.NewRunner(st), settings: &cfg}
+	if err := srv.RunPipelineSync(true); err != nil {
+		t.Fatalf("cek lokal tanpa Supabase harus sukses: %v", err)
+	}
+	srv.pipelineMu.Lock()
+	steps := append([]PipelineStep(nil), srv.pipeline.Steps...)
+	running := srv.pipeline.Running
+	srv.pipelineMu.Unlock()
+	if running {
+		t.Fatal("status harus berhenti berjalan setelah pipeline sinkron selesai")
+	}
+	var local, pull bool
+	for _, step := range steps {
+		switch {
+		case strings.HasPrefix(step.Name, "cek lokal"):
+			local = step.OK
+		case strings.HasPrefix(step.Name, "tarik & verifikasi"):
+			pull = strings.Contains(step.Note, "dilewati")
+		}
+	}
+	if !local {
+		t.Fatalf("langkah cek lokal harus tercatat sukses, dapat %+v", steps)
+	}
+	if !pull {
+		t.Fatalf("mode tes tidak boleh menarik dari Supabase, dapat %+v", steps)
+	}
+}
+
+// Langkah yang gagal harus muncul sebagai error dari pipeline sinkron (dipakai penjadwal untuk
+// memutuskan perlu percobaan ulang, bukan menulis penanda harian).
+func TestRunPipelineSyncReportsFailedStep(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "pipe2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"stub gagal"}`))
+	}))
+	defer stub.Close()
+	cfg := settings.Default()
+	cfg.SupabaseURL = stub.URL
+	cfg.SupabaseKey = "kunci-uji"
+	cfg.PipelinePushLimit = 10
+	srv := &Server{store: st, runner: scraper.NewRunner(st), settings: &cfg}
+	err = srv.RunPipelineSync(true)
+	if err == nil {
+		t.Fatal("push yang gagal harus membuat pipeline sinkron mengembalikan error")
+	}
+	if !strings.Contains(err.Error(), "push ke Supabase") {
+		t.Fatalf("error harus menyebut langkah gagal, dapat %q", err.Error())
+	}
+	srv.pipelineMu.Lock()
+	statusErr := srv.pipeline.Error
+	srv.pipelineMu.Unlock()
+	if statusErr == "" {
+		t.Fatal("status pipeline harus menyimpan pesan error")
 	}
 }

@@ -75,6 +75,12 @@ go build -ldflags "-X main.version=v0.1.0" -o panproxyscanner.exe .
   menit — bukan menunggu 24 jam. Catch-up berjalan di goroutine jadwal, jadi `Start()` tidak lagi
   menunggu satu pipeline penuh. Jalur scrape biasa (`Pipeline == nil`) tetap menandai saat memicu,
   karena `runner.Start` asinkron sehingga hasil akhirnya tidak diketahui di sana.
+  Penjadwal memakai `apiServer.RunPipelineSync` (pipeline di goroutine pemanggil, error
+  langkah gagal dikembalikan), sedangkan endpoint HTTP `/api/pipeline/run` tetap memakai
+  `RunPipelineMode` yang melepas pekerjaan ke latar belakang. Sebelum perbaikan ini penjadwal
+  memakai versi latar belakang, sehingga `RunPipelineMode` mengembalikan nil seketika dan
+  penanda ditulis sebelum run benar-benar selesai (terlihat di host: `last_full_scrape` sama
+  dengan detik restart).
 - **Push hanya yang berubah**: waktu push terakhir disimpan di `meta.last_push_at`; push dari
   jadwal 6 jam / auto-push hanya mengirim baris yang `last_checked`-nya lebih baru dari titik
   itu (`Filter.Since`). Pipeline harian tetap mengirim menyeluruh (Since kosong).

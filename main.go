@@ -293,7 +293,7 @@ func runServe(ctx context.Context) error {
 	// Setiap siklus selesai: dorong hasil ke Supabase dan/atau verifikasi baris lama.
 	runner.OnFinish = func(scraper.Progress, []scraper.SourceStat) { apiServer.AfterCycle() }
 	// Jadwal (interval/harian) menjalankan pipeline penuh kalau PipelineEnabled aktif.
-	sched.Pipeline = apiServer.RunPipelineMode
+	sched.Pipeline = apiServer.RunPipelineSync
 	srv := &http.Server{Addr: effAddr, Handler: apiServer.Handler()}
 
 	if cfg.Auto {

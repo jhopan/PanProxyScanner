@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -728,6 +729,26 @@ func (s *Server) RunPipeline() error {
 // meta.last_push_at). testOnly=false = siklus penuh: pull-verify, scrape semua sumber, push
 // menyeluruh, prune, housekeeping.
 func (s *Server) RunPipelineMode(testOnly bool) error {
+	if err := s.beginPipeline(); err != nil {
+		return err
+	}
+	go s.runPipelineLocked(testOnly)
+	return nil
+}
+
+// RunPipelineSync menjalankan pipeline di goroutine pemanggil dan mengembalikan error sebenarnya.
+// Dipakai penjadwal: penanda scrape harian hanya boleh ditulis kalau pipeline benar-benar sukses.
+// Tanpa varian ini penjadwal menandai "sudah jalan" padahal pipeline masih berjalan di latar
+// belakang, sehingga kegagalan tengah jalan tidak pernah terlihat dan tidak pernah dicoba lagi.
+func (s *Server) RunPipelineSync(testOnly bool) error {
+	if err := s.beginPipeline(); err != nil {
+		return err
+	}
+	return s.runPipelineLocked(testOnly)
+}
+
+// beginPipeline mengambil kunci pipeline dan menandai status sedang berjalan.
+func (s *Server) beginPipeline() error {
 	if !s.pipelineRun.TryLock() {
 		return fmt.Errorf("pipeline lain sedang berjalan")
 	}
@@ -738,151 +759,158 @@ func (s *Server) RunPipelineMode(testOnly bool) error {
 		p.Steps = nil
 		p.Error = ""
 	})
-
-	go func() {
-		defer s.pipelineRun.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Hour)
-		defer cancel()
-		cfg := s.currentSettings()
-		client := s.supabaseClient()
-
-		// --- langkah 1: tarik & verifikasi baris Supabase ---
-		pullLimit := cfg.PipelinePullLimit
-		if pullLimit <= 0 {
-			pullLimit = cfg.SupabasePullLimit
-		}
-		if !testOnly && client.Configured() && pullLimit > 0 {
-			started := time.Now()
-			summary, err := s.pullVerify(ctx, client, scraper.OptionsFromSettings(cfg), pullLimit)
-			step := PipelineStep{
-				Name: "tarik & verifikasi Supabase", OK: err == nil, MS: time.Since(started).Milliseconds(),
-				Counts: map[string]int{"dicek": summary.Checked, "hidup": summary.Alive, "mati": summary.Dead, "error": summary.Errors},
-			}
-			if err != nil {
-				step.Note = err.Error()
-			} else {
-				step.Note = fmt.Sprintf("%d baris diuji, %d masih hidup", summary.Checked, summary.Alive)
-			}
-			s.addPipelineStep(step)
-		} else {
-			s.addPipelineStep(PipelineStep{Name: "tarik & verifikasi Supabase", OK: true, Note: "dilewati (belum dikonfigurasi / limit 0)"})
-		}
-
-		// --- langkah 2: scrape sumber lalu verifikasi ---
-		if testOnly {
-			// Cek lokal (jadwal 6 jam): refresh baris tersimpan + pass target negara, tanpa
-			// mengambil sumber baru dan tanpa menarik ulang dari Supabase.
-			started := time.Now()
-			localOpts := scraper.OptionsFromSettings(cfg)
-			localOpts.LocalOnly = true
-			_ = s.waitForCycle(ctx, 10*time.Minute)
-			localErr := s.runner.Start(localOpts)
-			if localErr == nil {
-				localErr = s.waitForCycle(ctx, 30*time.Minute)
-			}
-			localProgress := s.runner.Progress()
-			localStep := PipelineStep{Name: "cek lokal (refresh + target negara)", OK: localErr == nil, MS: time.Since(started).Milliseconds(),
-				Counts: map[string]int{"diperiksa": localProgress.Refreshed, "hidup": localProgress.Alive}}
-			if localErr != nil {
-				localStep.Note = localErr.Error()
-			} else {
-				localStep.Note = fmt.Sprintf("%d baris diverifikasi ulang", localProgress.Refreshed)
-			}
-			s.addPipelineStep(localStep)
-		} else {
-			started := time.Now()
-			opts := scraper.OptionsFromSettings(cfg)
-			// Siklus manual/otomatis lain bisa sedang berjalan; tunggu dulu supaya langkah ini
-			// tidak dicatat gagal hanya karena berebut runner.
-			_ = s.waitForCycle(ctx, 15*time.Minute)
-			scrapeErr := s.runner.Start(opts)
-			if scrapeErr == nil {
-				scrapeErr = s.waitForCycle(ctx, 90*time.Minute)
-			}
-			progress := s.runner.Progress()
-			busy := scrapeErr != nil && strings.Contains(scrapeErr.Error(), "siklus lain")
-			step := PipelineStep{
-				Name: "scrape sumber & verifikasi", OK: scrapeErr == nil || busy, MS: time.Since(started).Milliseconds(),
-				Counts: map[string]int{"kandidat": progress.Candidates, "dicek": progress.Checked, "hidup": progress.Alive, "mati": progress.Dead},
-			}
-			switch {
-			case busy:
-				step.Note = "dilewati — siklus lain mengerjakan pekerjaan yang sama"
-			case scrapeErr != nil:
-				step.Note = scrapeErr.Error()
-			default:
-				step.Note = fmt.Sprintf("%d kandidat diperiksa, %d hidup", progress.Checked, progress.Alive)
-			}
-			s.addPipelineStep(step)
-
-		}
-
-		// --- langkah 3: push hasil ke Supabase ---
-		if client.Configured() && cfg.PipelinePushLimit > 0 {
-			started := time.Now()
-			edgeDead, edgeErr := client.PullEdgeVerdicts(ctx, 5000)
-			if edgeErr != nil {
-				edgeDead = nil
-			}
-			// Push saat cek lokal hanya mengirim yang berubah sejak push terakhir.
-			since := time.Time{}
-			if testOnly {
-				if raw, metaErr := s.store.Meta("last_push_at"); metaErr == nil && raw != "" {
-					if stamp, parseErr := time.Parse(time.RFC3339, raw); parseErr == nil {
-						since = stamp
-					}
-				}
-			}
-			pushed, skippedEdge, err := s.pushToSupabase(ctx, client, cfg, cfg.PipelinePushLimit, edgeDead, since)
-			step := PipelineStep{Name: "push ke Supabase", OK: err == nil, MS: time.Since(started).Milliseconds(), Counts: map[string]int{"dikirim": pushed}}
-			if err != nil {
-				step.Note = err.Error()
-			} else {
-				step.Note = fmt.Sprintf("%d proxy dikirim", pushed)
-				if skippedEdge > 0 {
-					step.Note += fmt.Sprintf(", %d ditahan (edge bilang mati)", skippedEdge)
-				}
-				step.Counts["ditahan_edge_mati"] = skippedEdge
-			}
-			s.addPipelineStep(step)
-		} else {
-			s.addPipelineStep(PipelineStep{Name: "push ke Supabase", OK: true, Note: "dilewati (belum dikonfigurasi / limit 0)"})
-		}
-
-		// --- langkah 4: housekeeping baris mati di Supabase ---
-		if !testOnly && client.Configured() && cfg.SupabasePruneDays > 0 {
-			started := time.Now()
-			deleted, err := s.pruneSupabase(ctx, client, cfg.SupabasePruneDays, 2000)
-			step := PipelineStep{Name: "prune baris mati Supabase", OK: err == nil, MS: time.Since(started).Milliseconds(), Counts: map[string]int{"dihapus": deleted, "hari": cfg.SupabasePruneDays}}
-			if err != nil {
-				step.Note = err.Error()
-			} else {
-				step.Note = fmt.Sprintf("%d baris mati (> %d hari) dihapus", deleted, cfg.SupabasePruneDays)
-			}
-			s.addPipelineStep(step)
-		} else {
-			s.addPipelineStep(PipelineStep{Name: "prune baris mati Supabase", OK: true, Note: "dilewati (supabase_prune_days = 0)"})
-		}
-
-		// --- langkah 5: housekeeping database lokal ---
-		{
-			started := time.Now()
-			hopeless, err := s.store.DeleteHopeless(2, 5000)
-			step := PipelineStep{Name: "bersihkan kandidat gagal berulang", OK: err == nil, MS: time.Since(started).Milliseconds(), Counts: map[string]int{"dihapus": int(hopeless)}}
-			if err != nil {
-				step.Note = err.Error()
-			} else {
-				step.Note = fmt.Sprintf("%d baris (>=2× gagal, belum pernah hidup) dihapus", hopeless)
-			}
-			s.addPipelineStep(step)
-		}
-
-		s.setPipeline(func(p *PipelineStatus) {
-			p.Running = false
-			p.EndedAt = time.Now()
-		})
-	}()
 	return nil
+}
+
+// runPipelineLocked menjalankan seluruh langkah pipeline. Pemanggil sudah memegang pipelineRun
+// dan fungsi ini selalu melepasnya; error yang dikembalikan mencerminkan langkah yang gagal.
+func (s *Server) runPipelineLocked(testOnly bool) error {
+	defer s.pipelineRun.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Hour)
+	defer cancel()
+	cfg := s.currentSettings()
+	client := s.supabaseClient()
+
+	// --- langkah 1: tarik & verifikasi baris Supabase ---
+	pullLimit := cfg.PipelinePullLimit
+	if pullLimit <= 0 {
+		pullLimit = cfg.SupabasePullLimit
+	}
+	if !testOnly && client.Configured() && pullLimit > 0 {
+		started := time.Now()
+		summary, err := s.pullVerify(ctx, client, scraper.OptionsFromSettings(cfg), pullLimit)
+		step := PipelineStep{
+			Name: "tarik & verifikasi Supabase", OK: err == nil, MS: time.Since(started).Milliseconds(),
+			Counts: map[string]int{"dicek": summary.Checked, "hidup": summary.Alive, "mati": summary.Dead, "error": summary.Errors},
+		}
+		if err != nil {
+			step.Note = err.Error()
+		} else {
+			step.Note = fmt.Sprintf("%d baris diuji, %d masih hidup", summary.Checked, summary.Alive)
+		}
+		s.addPipelineStep(step)
+	} else {
+		s.addPipelineStep(PipelineStep{Name: "tarik & verifikasi Supabase", OK: true, Note: "dilewati (belum dikonfigurasi / limit 0)"})
+	}
+
+	// --- langkah 2: scrape sumber lalu verifikasi ---
+	if testOnly {
+		// Cek lokal (jadwal 6 jam): refresh baris tersimpan + pass target negara, tanpa
+		// mengambil sumber baru dan tanpa menarik ulang dari Supabase.
+		started := time.Now()
+		localOpts := scraper.OptionsFromSettings(cfg)
+		localOpts.LocalOnly = true
+		_ = s.waitForCycle(ctx, 10*time.Minute)
+		localErr := s.runner.Start(localOpts)
+		if localErr == nil {
+			localErr = s.waitForCycle(ctx, 30*time.Minute)
+		}
+		localProgress := s.runner.Progress()
+		localStep := PipelineStep{Name: "cek lokal (refresh + target negara)", OK: localErr == nil, MS: time.Since(started).Milliseconds(),
+			Counts: map[string]int{"diperiksa": localProgress.Refreshed, "hidup": localProgress.Alive}}
+		if localErr != nil {
+			localStep.Note = localErr.Error()
+		} else {
+			localStep.Note = fmt.Sprintf("%d baris diverifikasi ulang", localProgress.Refreshed)
+		}
+		s.addPipelineStep(localStep)
+	} else {
+		started := time.Now()
+		opts := scraper.OptionsFromSettings(cfg)
+		// Siklus manual/otomatis lain bisa sedang berjalan; tunggu dulu supaya langkah ini
+		// tidak dicatat gagal hanya karena berebut runner.
+		_ = s.waitForCycle(ctx, 15*time.Minute)
+		scrapeErr := s.runner.Start(opts)
+		if scrapeErr == nil {
+			scrapeErr = s.waitForCycle(ctx, 90*time.Minute)
+		}
+		progress := s.runner.Progress()
+		busy := scrapeErr != nil && strings.Contains(scrapeErr.Error(), "siklus lain")
+		step := PipelineStep{
+			Name: "scrape sumber & verifikasi", OK: scrapeErr == nil || busy, MS: time.Since(started).Milliseconds(),
+			Counts: map[string]int{"kandidat": progress.Candidates, "dicek": progress.Checked, "hidup": progress.Alive, "mati": progress.Dead},
+		}
+		switch {
+		case busy:
+			step.Note = "dilewati — siklus lain mengerjakan pekerjaan yang sama"
+		case scrapeErr != nil:
+			step.Note = scrapeErr.Error()
+		default:
+			step.Note = fmt.Sprintf("%d kandidat diperiksa, %d hidup", progress.Checked, progress.Alive)
+		}
+		s.addPipelineStep(step)
+
+	}
+
+	// --- langkah 3: push hasil ke Supabase ---
+	if client.Configured() && cfg.PipelinePushLimit > 0 {
+		started := time.Now()
+		edgeDead, edgeErr := client.PullEdgeVerdicts(ctx, 5000)
+		if edgeErr != nil {
+			edgeDead = nil
+		}
+		// Push saat cek lokal hanya mengirim yang berubah sejak push terakhir.
+		since := time.Time{}
+		if testOnly {
+			if raw, metaErr := s.store.Meta("last_push_at"); metaErr == nil && raw != "" {
+				if stamp, parseErr := time.Parse(time.RFC3339, raw); parseErr == nil {
+					since = stamp
+				}
+			}
+		}
+		pushed, skippedEdge, err := s.pushToSupabase(ctx, client, cfg, cfg.PipelinePushLimit, edgeDead, since)
+		step := PipelineStep{Name: "push ke Supabase", OK: err == nil, MS: time.Since(started).Milliseconds(), Counts: map[string]int{"dikirim": pushed}}
+		if err != nil {
+			step.Note = err.Error()
+		} else {
+			step.Note = fmt.Sprintf("%d proxy dikirim", pushed)
+			if skippedEdge > 0 {
+				step.Note += fmt.Sprintf(", %d ditahan (edge bilang mati)", skippedEdge)
+			}
+			step.Counts["ditahan_edge_mati"] = skippedEdge
+		}
+		s.addPipelineStep(step)
+	} else {
+		s.addPipelineStep(PipelineStep{Name: "push ke Supabase", OK: true, Note: "dilewati (belum dikonfigurasi / limit 0)"})
+	}
+
+	// --- langkah 4: housekeeping baris mati di Supabase ---
+	if !testOnly && client.Configured() && cfg.SupabasePruneDays > 0 {
+		started := time.Now()
+		deleted, err := s.pruneSupabase(ctx, client, cfg.SupabasePruneDays, 2000)
+		step := PipelineStep{Name: "prune baris mati Supabase", OK: err == nil, MS: time.Since(started).Milliseconds(), Counts: map[string]int{"dihapus": deleted, "hari": cfg.SupabasePruneDays}}
+		if err != nil {
+			step.Note = err.Error()
+		} else {
+			step.Note = fmt.Sprintf("%d baris mati (> %d hari) dihapus", deleted, cfg.SupabasePruneDays)
+		}
+		s.addPipelineStep(step)
+	} else {
+		s.addPipelineStep(PipelineStep{Name: "prune baris mati Supabase", OK: true, Note: "dilewati (supabase_prune_days = 0)"})
+	}
+
+	// --- langkah 5: housekeeping database lokal ---
+	{
+		started := time.Now()
+		hopeless, err := s.store.DeleteHopeless(2, 5000)
+		step := PipelineStep{Name: "bersihkan kandidat gagal berulang", OK: err == nil, MS: time.Since(started).Milliseconds(), Counts: map[string]int{"dihapus": int(hopeless)}}
+		if err != nil {
+			step.Note = err.Error()
+		} else {
+			step.Note = fmt.Sprintf("%d baris (>=2× gagal, belum pernah hidup) dihapus", hopeless)
+		}
+		s.addPipelineStep(step)
+	}
+
+	var failure error
+	s.setPipeline(func(p *PipelineStatus) {
+		p.Running = false
+		p.EndedAt = time.Now()
+		if p.Error != "" {
+			failure = errors.New(p.Error)
+		}
+	})
+	return failure
 }
 
 // waitForCycle menunggu siklus scraping yang sedang berjalan selesai.
