@@ -216,8 +216,18 @@ func Run(ctx context.Context, st *store.Store, opts Options, sink Sink) ([]Sourc
 		p.Candidates = len(union)
 	})
 
-	// 2. Prioritaskan yang muncul di banyak sumber (sinyal kualitas), lalu port umum.
-	ranked := rank(union, counts, opts.MinSources)
+	// 2. Prioritaskan negara yang stoknya tipis, lalu yang muncul di banyak sumber
+	//    (sinyal kualitas), lalu port umum.
+	thin := thinCountries(st)
+	if len(thin) > 0 {
+		codes := make([]string, 0, len(thin))
+		for code := range thin {
+			codes = append(codes, code)
+		}
+		sort.Strings(codes)
+		log.Printf("stok tipis (didahulukan): %s", strings.Join(codes, ","))
+	}
+	ranked := rank(union, counts, countries, thin, opts.MinSources)
 
 	// 2b. Catat kesehatan tiap sumber: yang berkali-kali kosong dimatikan otomatis.
 	if cfgHealth := opts.SourceHealthLimit; cfgHealth > 0 || opts.UpdateSourceHealth {
@@ -366,7 +376,38 @@ func fetchAll(ctx context.Context, opts Options) ([]SourceStat, map[string]struc
 }
 
 // rank menyusun urutan kandidat: terbanyak muncul di sumber dulu, lalu port umum.
-func rank(union map[string]struct{}, counts map[string]int, minSources int) []string {
+// countryTarget adalah jumlah minimal proxy yang sanggup TLS 443 per negara.
+// Di bawah angka ini, kandidat dari negara tersebut didahulukan: daftar mass-scan berisi
+// ratusan ribu entri sehingga tanpa prioritas, negara seperti ID/SG nyaris tidak pernah
+// kebagian giliran verifikasi (terukur 2026-11-14: ID 0, SG 1 dari 36 proxy bertanda tembus).
+const countryTarget = 3
+
+// priorityCountries selalu dianggap tipis selama stoknya belum mencapai countryTarget,
+// walaupun databasenya belum punya satu baris pun untuk negara itu.
+var priorityCountries = []string{"ID", "SG", "MY", "JP", "HK", "KR"}
+
+// thinCountries mengembalikan negara yang stok TLS-nya masih di bawah target.
+func thinCountries(st *store.Store) map[string]bool {
+	out := make(map[string]bool, len(priorityCountries)+8)
+	for _, code := range priorityCountries {
+		out[code] = true
+	}
+	list, err := st.Countries(true)
+	if err != nil {
+		return out
+	}
+	for _, c := range list {
+		code := strings.ToUpper(strings.TrimSpace(c.Country))
+		if code == "" || c.TLS >= countryTarget {
+			delete(out, code)
+			continue
+		}
+		out[code] = true
+	}
+	return out
+}
+
+func rank(union map[string]struct{}, counts map[string]int, countries map[string]string, thin map[string]bool, minSources int) []string {
 	list := make([]string, 0, len(union))
 	for addr := range union {
 		if minSources > 0 && counts[addr] < minSources {
@@ -375,6 +416,12 @@ func rank(union map[string]struct{}, counts map[string]int, minSources int) []st
 		list = append(list, addr)
 	}
 	sort.Slice(list, func(i, j int) bool {
+		// 1. Negara yang stoknya tipis lebih dulu (kode negara dari sumber JSON kalau ada).
+		ti, tj := thin[strings.ToUpper(countries[list[i]])], thin[strings.ToUpper(countries[list[j]])]
+		if ti != tj {
+			return ti
+		}
+		// 2. Muncul di banyak sumber independen = sinyal kualitas.
 		ci, cj := counts[list[i]], counts[list[j]]
 		if ci != cj {
 			return ci > cj

@@ -49,18 +49,18 @@ func TestRankPrefersMultiSource(t *testing.T) {
 	}
 	counts := map[string]int{"1.1.1.1:1080": 1, "2.2.2.2:55555": 5, "3.3.3.3:4145": 3}
 
-	order := rank(union, counts, 0)
+	order := rank(union, counts, nil, nil, 0)
 	if len(order) != 3 || order[0] != "2.2.2.2:55555" || order[1] != "3.3.3.3:4145" {
 		t.Fatalf("rank harus urut jumlah sumber: %v", order)
 	}
 	// sumber sama banyak → port umum menang
 	tie := rank(map[string]struct{}{"4.4.4.4:55555": {}, "5.5.5.5:1080": {}},
-		map[string]int{"4.4.4.4:55555": 2, "5.5.5.5:1080": 2}, 0)
+		map[string]int{"4.4.4.4:55555": 2, "5.5.5.5:1080": 2}, nil, nil, 0)
 	if len(tie) != 2 || tie[0] != "5.5.5.5:1080" {
 		t.Fatalf("port umum harus didahulukan saat seri: %v", tie)
 	}
 	// minSources menyaring kandidat ber-sumber sedikit
-	filtered := rank(union, counts, 2)
+	filtered := rank(union, counts, nil, nil, 2)
 	for _, addr := range filtered {
 		if addr == "1.1.1.1:1080" {
 			t.Fatalf("kandidat dengan 1 sumber harus tersaring: %v", filtered)
@@ -68,5 +68,24 @@ func TestRankPrefersMultiSource(t *testing.T) {
 	}
 	if len(filtered) != 2 {
 		t.Fatalf("minSources=2 mau 2 kandidat, dapat %d", len(filtered))
+	}
+}
+
+// Negara yang stoknya tipis harus didahulukan, walaupun kandidatnya hanya muncul di satu sumber
+// dan portnya bukan port umum. Tanpa ini, negara seperti ID/SG selalu kalah oleh daftar mass-scan.
+func TestRankPrefersThinCountries(t *testing.T) {
+	union := map[string]struct{}{"1.1.1.1:1080": {}, "2.2.2.2:34567": {}, "3.3.3.3:1080": {}}
+	counts := map[string]int{"1.1.1.1:1080": 5, "2.2.2.2:34567": 1, "3.3.3.3:1080": 1}
+	countries := map[string]string{"2.2.2.2:34567": "ID", "3.3.3.3:1080": "US"}
+
+	got := rank(union, counts, countries, map[string]bool{"ID": true}, 0)
+	if got[0] != "2.2.2.2:34567" {
+		t.Fatalf("kandidat negara tipis harus lebih dulu, dapat %v", got)
+	}
+
+	// Tanpa negara tipis, urutan kembali ke jumlah sumber (sinyal kualitas).
+	got = rank(union, counts, countries, map[string]bool{}, 0)
+	if got[0] != "1.1.1.1:1080" {
+		t.Fatalf("tanpa prioritas, kandidat terbanyak-sumber harus lebih dulu, dapat %v", got)
 	}
 }

@@ -57,6 +57,7 @@ type Filter struct {
 type CountryCount struct {
 	Country string `json:"country"`
 	Alive   int    `json:"alive"`
+	TLS     int    `json:"tls"` // hidup DAN sanggup TLS 443 — inilah yang dipakai worker
 	Total   int    `json:"total"`
 }
 
@@ -557,9 +558,9 @@ FROM proxies`, cutoff)
 
 // Countries menghitung proxy per negara (hanya yang punya kode negara).
 func (s *Store) Countries(aliveOnly bool) ([]CountryCount, error) {
-	query := `SELECT COALESCE(country,''), COALESCE(SUM(alive),0), COUNT(*) FROM proxies WHERE country IS NOT NULL AND country <> '' GROUP BY country ORDER BY 2 DESC, 3 DESC LIMIT 200`
+	query := `SELECT COALESCE(country,''), COALESCE(SUM(alive),0), COALESCE(SUM(CASE WHEN alive = 1 AND tls_ok = 1 THEN 1 ELSE 0 END),0), COUNT(*) FROM proxies WHERE country IS NOT NULL AND country <> '' GROUP BY country ORDER BY 2 DESC, 4 DESC LIMIT 200`
 	if aliveOnly {
-		query = `SELECT COALESCE(country,''), COALESCE(SUM(alive),0), COUNT(*) FROM proxies WHERE country IS NOT NULL AND country <> '' AND alive = 1 GROUP BY country ORDER BY 2 DESC, 3 DESC LIMIT 200`
+		query = `SELECT COALESCE(country,''), COALESCE(SUM(alive),0), COALESCE(SUM(CASE WHEN alive = 1 AND tls_ok = 1 THEN 1 ELSE 0 END),0), COUNT(*) FROM proxies WHERE country IS NOT NULL AND country <> '' AND alive = 1 GROUP BY country ORDER BY 2 DESC, 4 DESC LIMIT 200`
 	}
 	rows, err := s.db.Query(query)
 	if err != nil {
@@ -569,7 +570,7 @@ func (s *Store) Countries(aliveOnly bool) ([]CountryCount, error) {
 	var out []CountryCount
 	for rows.Next() {
 		var c CountryCount
-		if err := rows.Scan(&c.Country, &c.Alive, &c.Total); err != nil {
+		if err := rows.Scan(&c.Country, &c.Alive, &c.TLS, &c.Total); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

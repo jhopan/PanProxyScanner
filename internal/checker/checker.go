@@ -218,9 +218,11 @@ func runStages(ctx context.Context, addr string, opts Options) Result {
 			if !result.Alive {
 				// proxy yang hanya bisa 443: latensinya dari tahap ini
 				result.Alive, result.Protocol, result.MS = true, protocol, ms
-			} else if ms > 0 && ms < result.MS {
-				// latensi diambil dari tahap yang paling cepat: satu ukuran
-				// "berapa lama satu permintaan lewat proxy ini", bukan jumlah semua tahap
+			} else if ms > 0 {
+				// Latensi yang dibandingkan antar proxy adalah latensi jalur yang benar-benar dipakai
+				// klien VLESS (443 + TLS), bukan jalur 80 yang hanya dipakai verifikasi. Dulu diambil
+				// yang tercepat, sehingga proxy yang cepat di 80 tapi lambat di 443 terlihat cepat di
+				// panel lalu mengecewakan saat dipakai.
 				result.MS = ms
 			}
 			notes = append(notes, protocol+" 443: "+info.summary())

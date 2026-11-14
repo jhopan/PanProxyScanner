@@ -218,3 +218,29 @@ func TestStatsCountsTLSCapability(t *testing.T) {
 		t.Fatalf("statistik salah: alive=%d tls=%d alt=%d", s.Alive, s.AliveTLS, s.AliveAlt)
 	}
 }
+
+// Countries harus memisahkan "hidup" dari "sanggup TLS": panel memakai angka TLS untuk
+// menentukan negara mana yang stoknya masih tipis.
+func TestCountriesCountsTLS(t *testing.T) {
+	st := openTest(t)
+	if err := st.RecordAlive("1.1.1.1", 1080, "socks5", "ID", 900, 2, true, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordAlive("2.2.2.2", 1080, "http", "ID", 700, 2, false, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	list, err := st.Countries(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range list {
+		if c.Country != "ID" {
+			continue
+		}
+		if c.Alive != 2 || c.TLS != 1 {
+			t.Fatalf("ID: alive=%d tls=%d, mau alive=2 tls=1", c.Alive, c.TLS)
+		}
+		return
+	}
+	t.Fatalf("negara ID tidak muncul di hasil: %+v", list)
+}
