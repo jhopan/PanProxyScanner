@@ -703,9 +703,11 @@ func (s *Server) RunPipeline() error {
 	return s.RunPipelineMode(false)
 }
 
-// RunPipelineMode menjalankan pipeline. testOnly=true melewati langkah scrape sumber baru:
-// tarik-verifikasi Supabase, push bukti terbaru, dan housekeeping tetap jalan. Dipakai jadwal
-// uji berkala (6 jam) supaya pool terjaga tanpa memakan sumber setiap kali.
+// RunPipelineMode menjalankan pipeline. testOnly=true dipakai jadwal 6 jam: tidak menarik baris
+// dari Supabase, tidak mengambil sumber baru, dan tidak prune — isinya cek lokal (refresh baris
+// tersimpan + pass target negara) lalu push delta (hanya baris yang berubah sejak
+// meta.last_push_at). testOnly=false = siklus penuh: pull-verify, scrape semua sumber, push
+// menyeluruh, prune, housekeeping.
 func (s *Server) RunPipelineMode(testOnly bool) error {
 	if !s.pipelineRun.TryLock() {
 		return fmt.Errorf("pipeline lain sedang berjalan")
