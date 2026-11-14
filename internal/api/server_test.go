@@ -557,3 +557,248 @@ func TestPruneUsesServiceKeyForDelete(t *testing.T) {
 		t.Fatalf("hitung kandidat tetap memakai anon key, dapat %v", headAuth)
 	}
 }
+
+// purgeStub menggantikan Supabase untuk uji POST /api/pool-purge: setiap request dicatat
+// supaya tes bisa memastikan anon key hanya dipakai untuk whoami dan service key hanya untuk
+// DELETE. Tidak ada jaringan nyata yang disentuh.
+type purgeStub struct {
+	mu           sync.Mutex
+	requests     []purgeCall
+	whoamiStatus int
+	whoamiBody   string
+	deleteStatus int
+	deleteRange  string
+}
+
+type purgeCall struct {
+	method string
+	path   string
+	query  string
+	auth   string
+	apikey string
+}
+
+func (st *purgeStub) handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		st.mu.Lock()
+		st.requests = append(st.requests, purgeCall{
+			method: r.Method, path: r.URL.Path, query: r.URL.RawQuery,
+			auth: r.Header.Get("Authorization"), apikey: r.Header.Get("apikey"),
+		})
+		st.mu.Unlock()
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/rest/v1/rpc/whoami":
+			status := st.whoamiStatus
+			if status == 0 {
+				status = http.StatusOK
+			}
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, st.whoamiBody)
+		case r.Method == http.MethodDelete:
+			status := st.deleteStatus
+			if status == 0 {
+				status = http.StatusNoContent
+			}
+			if st.deleteRange != "" {
+				w.Header().Set("Content-Range", st.deleteRange)
+			}
+			w.WriteHeader(status)
+		default:
+			w.WriteHeader(http.StatusNotImplemented)
+		}
+	}
+}
+
+// calls mengembalikan salinan request yang sudah diterima stub.
+func (st *purgeStub) calls() []purgeCall {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return append([]purgeCall(nil), st.requests...)
+}
+
+// deletes hanya mengembalikan request DELETE (operasi yang mengubah data).
+func (st *purgeStub) deletes() []purgeCall {
+	var out []purgeCall
+	for _, call := range st.calls() {
+		if call.method == http.MethodDelete {
+			out = append(out, call)
+		}
+	}
+	return out
+}
+
+// purgeTestServer menyiapkan Server dengan stub Supabase sebagai `supabase_url`.
+func purgeTestServer(t *testing.T, stub *purgeStub, serviceKey string) *Server {
+	t.Helper()
+	ts := httptest.NewServer(stub.handler())
+	t.Cleanup(ts.Close)
+	cfg := settings.Default()
+	cfg.SupabaseURL = ts.URL
+	cfg.SupabaseKey = "kunci-anon"
+	cfg.SupabaseServiceKey = serviceKey
+	return &Server{settings: &cfg}
+}
+
+// doPoolPurge menjalankan satu POST /api/pool-purge langsung ke handler (tanpa router).
+func doPoolPurge(srv *Server, body string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	srv.handlePoolPurge(rec, httptest.NewRequest(http.MethodPost, "/api/pool-purge", strings.NewReader(body)))
+	return rec
+}
+
+// Tanpa service key endpoint tidak boleh menyentuh Supabase sama sekali: anon key tidak bisa
+// DELETE, jadi request apa pun hanya menambah latensi dan kesempatan fail-open.
+func TestPoolPurgeWithoutServiceKeyIs503(t *testing.T) {
+	stub := &purgeStub{}
+	srv := purgeTestServer(t, stub, "")
+
+	rec := doPoolPurge(srv, `{"username":"budi","hash":"hash-sesi"}`)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("tanpa service key harus 503, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "supabase_service_key") {
+		t.Fatalf("pesan 503 harus menyebut supabase_service_key, dapat %s", rec.Body.String())
+	}
+	if calls := stub.calls(); len(calls) != 0 {
+		t.Fatalf("tanpa service key tidak boleh ada request ke Supabase, dapat %v", calls)
+	}
+}
+
+// Hash salah (whoami membalas string kosong) = 401 dan tidak pernah ada DELETE.
+func TestPoolPurgeWrongHashIs401(t *testing.T) {
+	stub := &purgeStub{whoamiBody: `""`}
+	srv := purgeTestServer(t, stub, "kunci-service")
+
+	rec := doPoolPurge(srv, `{"username":"budi","hash":"hash-salah"}`)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("hash salah harus 401, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	if deletes := stub.deletes(); len(deletes) != 0 {
+		t.Fatalf("hash salah tidak boleh menghapus apa pun, dapat %v", deletes)
+	}
+}
+
+// Role selain admin = 403; DELETE tetap tidak dipanggil.
+func TestPoolPurgeNonAdminIs403(t *testing.T) {
+	stub := &purgeStub{whoamiBody: `"user"`}
+	srv := purgeTestServer(t, stub, "kunci-service")
+
+	rec := doPoolPurge(srv, `{"username":"budi","hash":"hash-sesi"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("role non-admin harus 403, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	if deletes := stub.deletes(); len(deletes) != 0 {
+		t.Fatalf("non-admin tidak boleh menghapus apa pun, dapat %v", deletes)
+	}
+}
+
+// RPC whoami belum ada (404/PGRST202) = 409 yang menyebut migrasi SQL, bukan 401 dan bukan
+// fail-open ke anon key.
+func TestPoolPurgeMissingWhoamiIs409(t *testing.T) {
+	stub := &purgeStub{
+		whoamiStatus: http.StatusNotFound,
+		whoamiBody:   `{"code":"PGRST202","message":"Could not find the function public.whoami in the schema cache"}`,
+	}
+	srv := purgeTestServer(t, stub, "kunci-service")
+
+	rec := doPoolPurge(srv, `{"username":"budi","hash":"hash-sesi"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("whoami belum ada harus 409, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "2026-11-14-login-lockout.sql") {
+		t.Fatalf("pesan 409 harus menyebut migrasi yang harus dijalankan, dapat %s", rec.Body.String())
+	}
+	if deletes := stub.deletes(); len(deletes) != 0 {
+		t.Fatalf("tanpa whoami tidak boleh menghapus apa pun, dapat %v", deletes)
+	}
+}
+
+// Admin: whoami memakai anon key, DELETE memakai service key, dan deleted dibaca dari
+// Content-Range (`*/N`).
+func TestPoolPurgeDeletesWithServiceKey(t *testing.T) {
+	stub := &purgeStub{whoamiBody: `"admin"`, deleteStatus: http.StatusOK, deleteRange: "*/3"}
+	srv := purgeTestServer(t, stub, "kunci-service")
+
+	rec := doPoolPurge(srv, `{"username":" Budi ","hash":"hash-sesi"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("purge admin harus 200, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Success bool `json:"success"`
+		Deleted int  `json:"deleted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("balasan purge bukan JSON: %v", err)
+	}
+	if !payload.Success || payload.Deleted != 3 {
+		t.Fatalf("balasan harus success true + deleted 3, dapat %+v", payload)
+	}
+
+	deletes := stub.deletes()
+	if len(deletes) != 1 {
+		t.Fatalf("harus ada tepat satu DELETE, dapat %v", deletes)
+	}
+	if deletes[0].auth != "Bearer kunci-service" || deletes[0].apikey != "kunci-service" {
+		t.Fatalf("DELETE harus memakai service key, dapat %+v", deletes[0])
+	}
+	if deletes[0].query != "is_active=eq.false" {
+		t.Fatalf("DELETE harus memfilter is_active=eq.false, dapat %q", deletes[0].query)
+	}
+
+	var whoamiCalls int
+	for _, call := range stub.calls() {
+		if call.path != "/rest/v1/rpc/whoami" {
+			continue
+		}
+		whoamiCalls++
+		if call.auth != "Bearer kunci-anon" || call.apikey != "kunci-anon" {
+			t.Fatalf("whoami harus memakai anon key, dapat %+v", call)
+		}
+	}
+	if whoamiCalls != 1 {
+		t.Fatalf("harus ada tepat satu panggilan whoami, dapat %d", whoamiCalls)
+	}
+}
+
+// Limiter per IP: jatah habis = 429 + Retry-After, bukan percobaan hash tanpa batas.
+func TestPoolPurgeRateLimited(t *testing.T) {
+	stub := &purgeStub{whoamiBody: `"admin"`, deleteStatus: http.StatusOK, deleteRange: "*/0"}
+	srv := purgeTestServer(t, stub, "kunci-service")
+
+	for i := range poolPurgeRateLimit {
+		if rec := doPoolPurge(srv, `{"username":"budi","hash":"hash-sesi"}`); rec.Code != http.StatusOK {
+			t.Fatalf("permintaan ke-%d harus 200, dapat %d: %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	rec := doPoolPurge(srv, `{"username":"budi","hash":"hash-sesi"}`)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("permintaan berlebih harus 429, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("429 harus menyertakan Retry-After")
+	}
+}
+
+// Rute /api/pool-purge harus publik di router (panel tidak punya sesi/token scanner) dan
+// preflight CORS-nya dilayani, karena panel memanggilnya lintas origin dari Pages.
+func TestPoolPurgeRouteIsPublicWithCORS(t *testing.T) {
+	stub := &purgeStub{whoamiBody: `"admin"`, deleteStatus: http.StatusOK, deleteRange: "*/1"}
+	srv := purgeTestServer(t, stub, "kunci-service")
+	handler := srv.Handler()
+
+	preflight := httptest.NewRecorder()
+	handler.ServeHTTP(preflight, httptest.NewRequest(http.MethodOptions, "/api/pool-purge", nil))
+	if preflight.Code != http.StatusNoContent {
+		t.Fatalf("preflight harus 204, dapat %d", preflight.Code)
+	}
+	if origin := preflight.Header().Get("Access-Control-Allow-Origin"); origin != "*" {
+		t.Fatalf("preflight harus mengizinkan origin panel, dapat %q", origin)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/pool-purge",
+		strings.NewReader(`{"username":"budi","hash":"hash-sesi"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST tanpa sesi scanner harus diteruskan ke handler (200), dapat %d: %s", rec.Code, rec.Body.String())
+	}
+}

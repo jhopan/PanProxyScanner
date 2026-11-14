@@ -2,11 +2,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -60,6 +62,11 @@ type Server struct {
 	tunnelState   tunnelState
 	tunnelStateAt time.Time
 	tunnelProbing bool
+
+	// purgeMu melindungi purgeHits: jatah POST /api/pool-purge per IP. Endpoint itu
+	// memverifikasi hash lewat RPC whoami, jadi tanpa pagar ia menjadi oracle hash tanpa batas.
+	purgeMu   sync.Mutex
+	purgeHits map[string]purgeHit
 }
 
 // New membuat server. `cfgPath` adalah lokasi settings.json (dipakai saat menyimpan).
@@ -100,6 +107,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/supabase/push", s.handleSupabasePush)
 	mux.HandleFunc("/api/supabase/pull-verify", s.handleSupabasePullVerify)
 	mux.HandleFunc("/api/supabase/prune", s.handleSupabasePrune)
+	mux.HandleFunc("/api/pool-purge", s.handlePoolPurge)
 	mux.HandleFunc("/api/vless/clash", s.handleClash)
 	mux.HandleFunc("/api/vless/raw", s.handleRaw)
 	return s.withCommon(mux)
@@ -109,6 +117,8 @@ func (s *Server) Handler() http.Handler {
 //
 //   - /login dan /api/login terbuka.
 //   - /api/health terbuka supaya bisa dipakai monitoring/tunnel check.
+//   - /api/pool-purge terbuka: panel CFVPN Hub memverifikasi dirinya sendiri lewat body
+//     (username + hash → RPC whoami) dan DELETE-nya memakai service key di sisi scanner.
 //   - rute lain: sesi valid ATAU token API (kalau token diatur di pengaturan) — token
 //     dipakai klien mesin seperti panel CFVPN Hub yang tidak bisa login lewat browser.
 func (s *Server) withCommon(next http.Handler) http.Handler {
@@ -122,7 +132,7 @@ func (s *Server) withCommon(next http.Handler) http.Handler {
 		}
 
 		path := r.URL.Path
-		public := path == "/login" || path == "/api/login" || path == "/api/health"
+		public := path == "/login" || path == "/api/login" || path == "/api/health" || path == "/api/pool-purge"
 		if public {
 			next.ServeHTTP(w, r)
 			return
@@ -412,6 +422,275 @@ func (s *Server) handleSupabasePullVerify(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, summary)
+}
+
+// ---------------------------------------------------------------- purge proxy_pool (panel CFVPN Hub)
+
+// poolPurgeRateLimit / poolPurgeRateWindow membatasi percobaan POST /api/pool-purge per IP.
+// Verifikasi hash di endpoint ini memanggil RPC whoami, jadi tanpa pagar ia menjadi oracle
+// hash tanpa batas. Limiter in-memory per proses cukup karena scanner hanya satu instance.
+const (
+	poolPurgeRateLimit  = 6
+	poolPurgeRateWindow = 10 * time.Minute
+)
+
+// poolPurgeMissingRPCNote dipakai saat RPC whoami belum ada: itu sinyal migrasi SQL belum
+// dijalankan, bukan hash salah, dan endpoint destruktif tidak boleh fail-open.
+const poolPurgeMissingRPCNote = "RPC whoami belum ada di database. Jalankan sql/2026-11-14-login-lockout.sql dulu, lalu coba lagi."
+
+// purgeHit adalah jatah percobaan satu IP dalam satu jendela waktu.
+type purgeHit struct {
+	count int
+	reset time.Time
+}
+
+// purgeGate mencatat satu percobaan untuk `ip` dan memberi tahu berapa lama pemanggil harus
+// menunggu kalau jatahnya habis. Entri kedaluwarsa dibuang tiap panggilan supaya map tidak
+// tumbuh tanpa batas.
+func (s *Server) purgeGate(ip string) (retryAfter time.Duration, limited bool) {
+	now := time.Now()
+	s.purgeMu.Lock()
+	defer s.purgeMu.Unlock()
+	if s.purgeHits == nil {
+		s.purgeHits = map[string]purgeHit{}
+	}
+	for key, hit := range s.purgeHits {
+		if !now.Before(hit.reset) {
+			delete(s.purgeHits, key)
+		}
+	}
+	hit, ok := s.purgeHits[ip]
+	if !ok {
+		s.purgeHits[ip] = purgeHit{count: 1, reset: now.Add(poolPurgeRateWindow)}
+		return 0, false
+	}
+	if hit.count >= poolPurgeRateLimit {
+		return time.Until(hit.reset), true
+	}
+	hit.count++
+	s.purgeHits[ip] = hit
+	return 0, false
+}
+
+// clientIP mengambil alamat pemanggil: Cloudflare mengisi CF-Connecting-IP, proxy lain
+// X-Forwarded-For (hop pertama), dan uji lokal RemoteAddr.
+func clientIP(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); v != "" {
+		return v
+	}
+	if v := r.Header.Get("X-Forwarded-For"); v != "" {
+		if first, _, ok := strings.Cut(v, ","); ok {
+			v = first
+		}
+		if v = strings.TrimSpace(v); v != "" {
+			return v
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// poolPurgeHTTP adalah klien untuk panggilan langsung ke PostgREST: purge butuh RPC (anon
+// key) dan DELETE (service key), sedangkan supabase.Client hanya membungkus satu tabel
+// dengan satu key.
+var poolPurgeHTTP = &http.Client{Timeout: 20 * time.Second}
+
+// supabaseBaseURL menormalkan URL project (tanpa garis miring di ujung).
+func supabaseBaseURL(cfg settings.Settings) string {
+	return strings.TrimRight(strings.TrimSpace(cfg.SupabaseURL), "/")
+}
+
+// postgrestCode mengambil kode error PostgREST/SQLSTATE dari badan balasan.
+func postgrestCode(data []byte) string {
+	var body struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(data, &body) == nil {
+		return body.Code
+	}
+	return ""
+}
+
+// poolWhoamiRole memanggil RPC whoami lewat PostgREST dengan anon key. Role kosong berarti
+// hash tidak cocok / user tidak ada; missing berarti fungsi belum ada di database.
+func poolWhoamiRole(ctx context.Context, base, anonKey, username, hash string) (role string, missing bool, err error) {
+	payload, err := json.Marshal(map[string]string{"p_username": username, "p_hash": hash})
+	if err != nil {
+		return "", false, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/rest/v1/rpc/whoami", bytes.NewReader(payload))
+	if err != nil {
+		return "", false, err
+	}
+	req.Header.Set("apikey", anonKey)
+	req.Header.Set("Authorization", "Bearer "+anonKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := poolPurgeHTTP.Do(req)
+	if err != nil {
+		return "", false, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", false, err
+	}
+	if code := postgrestCode(data); code == "PGRST202" || code == "42883" || code == "42P01" {
+		return "", true, nil
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return "", true, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", false, fmt.Errorf("verifikasi sesi gagal di Supabase: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	// RPC `returns text`: PostgREST membalas string JSON; sebagian versi membungkusnya array.
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return "", false, fmt.Errorf("balasan whoami bukan JSON: %w", err)
+	}
+	return whoamiRoleOf(value), false, nil
+}
+
+// whoamiRoleOf menormalkan balasan whoami (`"admin"`, `["admin"]`, atau null) jadi role.
+func whoamiRoleOf(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case []any:
+		if len(v) > 0 {
+			return whoamiRoleOf(v[0])
+		}
+	}
+	return ""
+}
+
+// poolDeleteDead menghapus semua baris `is_active = false` memakai service key. Jumlah
+// terhapus dibaca dari Content-Range (PostgREST membalas `*/N` untuk DELETE count=exact).
+func poolDeleteDead(ctx context.Context, base, serviceKey, table string) (int, error) {
+	if strings.TrimSpace(table) == "" {
+		table = "proxy_pool"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
+		base+"/rest/v1/"+neturl.PathEscape(table)+"?is_active=eq.false", nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("apikey", serviceKey)
+	req.Header.Set("Authorization", "Bearer "+serviceKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "count=exact, return=minimal")
+	resp, err := poolPurgeHTTP.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return 0, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("gagal menghapus baris proxy mati: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	return countFromContentRange(resp.Header.Get("Content-Range")), nil
+}
+
+// countFromContentRange membaca N dari `*/N` atau `0-9/N` (0 kalau tidak ada/aneh).
+func countFromContentRange(value string) int {
+	_, total, ok := strings.Cut(value, "/")
+	if !ok || total == "" || total == "*" {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(total))
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// handlePoolPurge menghapus semua baris mati (`is_active = false`) di proxy_pool atas
+// permintaan panel CFVPN Hub: POST {username, hash} -> {success, deleted}.
+//
+// Rute ini publik (tanpa sesi/token scanner) karena panel memverifikasi dirinya sendiri:
+// hash sesi panel diperiksa lewat RPC whoami (anon key) dan role wajib `admin`. DELETE-nya
+// memakai `supabase_service_key` yang tidak pernah keluar dari mesin scanner.
+//
+// Fail-closed: tanpa service key, tanpa RPC whoami, atau role bukan admin, tidak ada DELETE.
+func (s *Server) handlePoolPurge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "pakai POST"})
+		return
+	}
+	if wait, limited := s.purgeGate(clientIP(r)); limited {
+		secs := int(wait.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{
+			"error": fmt.Sprintf("terlalu banyak permintaan. Coba lagi dalam %d detik.", secs),
+		})
+		return
+	}
+
+	cfg := s.currentSettings()
+	base := supabaseBaseURL(cfg)
+	anonKey := strings.TrimSpace(cfg.SupabaseKey)
+	serviceKey := strings.TrimSpace(cfg.SupabaseServiceKey)
+	// Service key diperiksa sebelum menyentuh database: tanpa key itu tidak ada jalur sah
+	// untuk menghapus, jadi jangan pernah lanjut dengan anon key.
+	if serviceKey == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "supabase_service_key belum diset di scanner, jadi tombol bersihkan baris mati dinonaktifkan.",
+		})
+		return
+	}
+	if base == "" || anonKey == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "supabase_url/supabase_key belum diset di scanner, jadi sesi panel tidak bisa diverifikasi.",
+		})
+		return
+	}
+
+	var body struct {
+		Username string `json:"username"`
+		Hash     string `json:"hash"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body JSON tidak valid."})
+		return
+	}
+	username := strings.ToLower(strings.TrimSpace(body.Username))
+	if username == "" || strings.ContainsAny(username, " \t\r\n") || body.Hash == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "username/hash tidak valid."})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	role, missing, err := poolWhoamiRole(ctx, base, anonKey, username, body.Hash)
+	if missing {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": poolPurgeMissingRPCNote})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	if role == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "sesi tidak valid — login ulang."})
+		return
+	}
+	if role != "admin" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "hanya admin yang boleh menghapus baris proxy."})
+		return
+	}
+
+	deleted, err := poolDeleteDead(ctx, base, serviceKey, cfg.SupabaseTable)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "deleted": deleted})
 }
 
 // pushMaxAge membatasi umur verdict yang boleh dipakai saat push. `fresh_minutes` (default

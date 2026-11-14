@@ -94,6 +94,7 @@ go build -ldflags "-X main.version=v0.1.0" -o panproxyscanner.exe .
   dijalankan manusia) dan TIDAK boleh tertukar dengan `tunnel_ok`/`tunnel_ms`/`tunnel_checked`
   yang edge-only (diisi cron CFVPN); scanner hanya membaca `tunnel_ok` sebagai penahan
   (`PullEdgeVerdicts`). Kalau kolomnya belum ada, push tetap sukses tanpa kolom itu.
+- **Endpoint purge untuk panel cfvpn-hub**: `POST /api/pool-purge` (`{username, hash}`) memverifikasi lewat RPC `whoami` (anon key) dan hanya mengizinkan `admin`, lalu `DELETE proxy_pool?is_active=eq.false` memakai `supabase_service_key`. Balasan 200/400/401/403/405/409/429/502/503, limiter 6 permintaan/10 menit per IP (in-memory), dan TIDAK pernah memakai anon untuk DELETE. Dipakai tombol "bersihkan baris mati" di panel setelah Pages Function-nya dihapus.
 - **Prune butuh service key**: setelah migrasi `sql/2026-11-15-pool-prune-service-key.sql` (repo
   cfvpn-hub) mencabut DELETE anon pada `proxy_pool`, penghapusan baris mati memakai setting
   `supabase_service_key` (service_role; tidak pernah dikembalikan API, hanya

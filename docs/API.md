@@ -24,6 +24,7 @@ Aturan akses:
 |---|---|
 | `GET /login`, `POST /api/login` | publik |
 | `GET /api/health` | publik (monitoring) |
+| `POST /api/pool-purge` | publik, tetapi wajib `{username, hash}` sesi panel dengan role `admin` (lihat bagian *Purge `proxy_pool`*) |
 | rute lain | cookie sesi **atau** token API (kalau token diatur) |
 
 Tanpa sesi/token, `/api/*` menjawab `401`, sedangkan halaman HTML dialihkan (`302`) ke `/login`.
@@ -86,6 +87,7 @@ Isi dulu **URL**, **key**, dan **tabel** di menu **Supabase** (atau lewat `POST 
 | `POST /api/supabase/push?limit=500` | kirim proxy **hidup & segar** dari database lokal ke Supabase (upsert by `ip,port`); kolom yang ditulis: `ip`, `port`, `country`, `is_active`, `ping`, `last_checked`, bukti `tls_ok`/`alt_ok`/`exit_ip`, dan bukti vantage host `tunnel_host_ok`/`tunnel_host_ms`/`tunnel_host_checked`. Kolom bukti yang belum ada di tabel dilepas otomatis (hanya untuk error kolom: HTTP 400 `PGRST204`/`42703`), jadi push tidak gagal di project yang SQL-nya belum dijalankan |
 | `POST /api/supabase/pull-verify?limit=50&jobs=100` | tarik baris dari Supabase (yang paling lama tidak dicek), verifikasi satu per satu di sini, lalu tulis balik `is_active`/`ping`/`last_checked` — baris yang mati langsung ditandai |
 | `POST /api/supabase/prune?days=7&limit=2000` | hapus baris **mati** yang terakhir dicek lebih dari N hari. Balasan `{ "deleted": N, "kandidat_sebelumnya": M }` |
+| `POST /api/pool-purge` | hapus **semua** baris mati (`is_active = false`) atas permintaan panel CFVPN Hub (whoami + role `admin`, DELETE memakai `supabase_service_key`). Detail di bawah |
 
 **Catatan `prune`:** DELETE ke `proxy_pool` butuh **`supabase_service_key`** (service_role key),
 karena panel tidak lagi memberi anon izin hapus. Tanpa key itu `prune` tidak menembak Supabase
@@ -94,6 +96,38 @@ sama sekali dan menjawab `200` dengan `deleted: 0` + `note` bahwa prune butuh
 seperti biasa. Di sisi panel, jalankan migrasi `sql/2026-11-15-pool-prune-service-key.sql`
 (policy DELETE untuk `service_role`); kalau `deleted` tetap 0 padahal ada kandidat, key itu
 kemungkinan bukan service_role key.
+
+### Purge `proxy_pool` (dipakai panel CFVPN Hub)
+
+`POST /api/pool-purge` menghapus **semua** baris `is_active = false` di tabel Supabase. Rute
+ini publik di scanner, karena panel CFVPN Hub (Pages) tidak memegang `supabase_service_key`:
+panel mengirim identitas sesinya sendiri dan scanner yang memutuskan.
+
+```json
+{ "username": "budi", "hash": "<hash sesi panel>" }
+```
+
+Verifikasi: `POST <supabase_url>/rest/v1/rpc/whoami` dengan body `{p_username, p_hash}` dan
+**`supabase_key` (anon)**, role hasilnya wajib `admin`. DELETE-nya memakai
+**`supabase_service_key`** ke `<supabase_url>/rest/v1/<supabase_table>?is_active=eq.false`
+dengan `Prefer: count=exact, return=minimal`; jumlah terhapus dibaca dari `Content-Range`.
+
+| Status | Balasan | Arti |
+|---|---|---|
+| `200` | `{ "success": true, "deleted": N }` | semua baris mati terhapus |
+| `400` | `{ "error": "..." }` | body bukan JSON, atau `username`/`hash` kosong/tidak valid |
+| `401` | `{ "error": "sesi tidak valid — login ulang." }` | hash salah atau user tidak ada |
+| `403` | `{ "error": "hanya admin yang boleh menghapus baris proxy." }` | hash benar, role bukan `admin` |
+| `405` | `{ "error": "pakai POST" }` | metode bukan POST |
+| `409` | `{ "error": "... sql/2026-11-14-login-lockout.sql ..." }` | RPC `whoami` belum ada (404/`PGRST202`/`42883`/`42P01`) |
+| `429` | `{ "error": "..." }` + `Retry-After` | limiter per IP (6 permintaan / 10 menit) |
+| `502` | `{ "error": "..." }` | `whoami` gagal selain "belum ada", atau DELETE ditolak Supabase |
+| `503` | `{ "error": "..." }` | `supabase_service_key` (atau `supabase_url`/`supabase_key`) belum diset |
+
+Gerbangnya **fail-closed**: tanpa service key tidak ada satu pun request ke Supabase, dan anon
+key tidak pernah dipakai untuk DELETE. Endpoint ini juga tidak pernah melaporkan `success`
+kalau DELETE gagal. Di panel, URL scanner ada di konstanta `SCANNER_URL`
+(`frontend/app.js`), jadi pindah host cukup mengubah satu baris.
 
 Dua hal yang ikut menentukan kualitas push:
 
