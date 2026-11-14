@@ -1129,6 +1129,10 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		CountryTargets      *map[string]int `json:"country_targets"`
 		ScheduleTimezone    *string         `json:"schedule_timezone"`
 		TestIntervalHours   *int            `json:"test_interval_hours"`
+		AutoDisableLowYield *bool           `json:"auto_disable_low_yield"`
+		LowYieldCycles      *int            `json:"low_yield_cycles"`
+		LowYieldMinEntries  *int            `json:"low_yield_min_entries"`
+		CountryTopUp        *int            `json:"country_top_up"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body JSON tidak valid: " + err.Error()})
@@ -1242,6 +1246,18 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if patch.TestIntervalHours != nil {
 		cfg.TestIntervalHours = *patch.TestIntervalHours
 	}
+	if patch.AutoDisableLowYield != nil {
+		cfg.AutoDisableLowYield = *patch.AutoDisableLowYield
+	}
+	if patch.LowYieldCycles != nil {
+		cfg.LowYieldCycles = *patch.LowYieldCycles
+	}
+	if patch.LowYieldMinEntries != nil {
+		cfg.LowYieldMinEntries = *patch.LowYieldMinEntries
+	}
+	if patch.CountryTopUp != nil {
+		cfg.CountryTopUp = *patch.CountryTopUp
+	}
 	cfg.Normalize()
 	*s.settings = cfg
 	s.mu.Unlock()
@@ -1258,41 +1274,45 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 func publicSettings(cfg settings.Settings) map[string]any {
 	passwordSet := cfg.AdminPasswordHash != settings.DefaultPasswordHash()
 	return map[string]any{
-		"auto":                  cfg.Auto,
-		"interval_minutes":      cfg.IntervalMinutes,
-		"auto_rotate":           cfg.AutoRotate,
-		"cap":                   cfg.Cap,
-		"jobs":                  cfg.Jobs,
-		"min_sources":           cfg.MinSources,
-		"refresh_limit":         cfg.RefreshLimit,
-		"refresh_after_minutes": cfg.RefreshAfterMinutes,
-		"fresh_minutes":         cfg.FreshMinutes,
-		"purge_dead_hours":      cfg.PurgeDeadHours,
-		"admin_user":            cfg.AdminUser,
-		"admin_password_set":    passwordSet,
-		"public_url":            cfg.PublicURL,
-		"tunnel_name":           cfg.TunnelName,
-		"tunnel_domain":         cfg.TunnelDomain,
-		"supabase_url":          cfg.SupabaseURL,
-		"supabase_key_set":      cfg.SupabaseKey != "",
-		"supabase_table":        cfg.SupabaseTable,
-		"supabase_auto_push":    cfg.SupabaseAutoPush,
-		"supabase_pull_limit":   cfg.SupabasePullLimit,
-		"schedule_mode":         cfg.ScheduleMode,
-		"daily_at":              cfg.DailyAt,
-		"pipeline_enabled":      cfg.PipelineEnabled,
-		"pipeline_pull_limit":   cfg.PipelinePullLimit,
-		"pipeline_push_limit":   cfg.PipelinePushLimit,
-		"probe_tls":             cfg.ProbeTLS,
-		"probe_alt":             cfg.ProbeAlt,
-		"push_require_tls":      cfg.PushRequireTLS,
-		"supabase_prune_days":   cfg.SupabasePruneDays,
-		"auto_disable_sources":  cfg.AutoDisableSources,
-		"zero_streak_limit":     cfg.ZeroStreakLimit,
-		"country_targets":       cfg.CountryTargets,
-		"schedule_timezone":     cfg.ScheduleTimezone,
-		"test_interval_hours":   cfg.TestIntervalHours,
-		"token":                 cfg.Token,
+		"auto":                   cfg.Auto,
+		"interval_minutes":       cfg.IntervalMinutes,
+		"auto_rotate":            cfg.AutoRotate,
+		"cap":                    cfg.Cap,
+		"jobs":                   cfg.Jobs,
+		"min_sources":            cfg.MinSources,
+		"refresh_limit":          cfg.RefreshLimit,
+		"refresh_after_minutes":  cfg.RefreshAfterMinutes,
+		"fresh_minutes":          cfg.FreshMinutes,
+		"purge_dead_hours":       cfg.PurgeDeadHours,
+		"admin_user":             cfg.AdminUser,
+		"admin_password_set":     passwordSet,
+		"public_url":             cfg.PublicURL,
+		"tunnel_name":            cfg.TunnelName,
+		"tunnel_domain":          cfg.TunnelDomain,
+		"supabase_url":           cfg.SupabaseURL,
+		"supabase_key_set":       cfg.SupabaseKey != "",
+		"supabase_table":         cfg.SupabaseTable,
+		"supabase_auto_push":     cfg.SupabaseAutoPush,
+		"supabase_pull_limit":    cfg.SupabasePullLimit,
+		"schedule_mode":          cfg.ScheduleMode,
+		"daily_at":               cfg.DailyAt,
+		"pipeline_enabled":       cfg.PipelineEnabled,
+		"pipeline_pull_limit":    cfg.PipelinePullLimit,
+		"pipeline_push_limit":    cfg.PipelinePushLimit,
+		"probe_tls":              cfg.ProbeTLS,
+		"probe_alt":              cfg.ProbeAlt,
+		"push_require_tls":       cfg.PushRequireTLS,
+		"supabase_prune_days":    cfg.SupabasePruneDays,
+		"auto_disable_sources":   cfg.AutoDisableSources,
+		"zero_streak_limit":      cfg.ZeroStreakLimit,
+		"country_targets":        cfg.CountryTargets,
+		"schedule_timezone":      cfg.ScheduleTimezone,
+		"test_interval_hours":    cfg.TestIntervalHours,
+		"auto_disable_low_yield": cfg.AutoDisableLowYield,
+		"low_yield_cycles":       cfg.LowYieldCycles,
+		"low_yield_min_entries":  cfg.LowYieldMinEntries,
+		"country_top_up":         cfg.CountryTopUp,
+		"token":                  cfg.Token,
 	}
 }
 

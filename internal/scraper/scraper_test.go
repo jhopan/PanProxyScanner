@@ -146,3 +146,26 @@ func TestCreditSources(t *testing.T) {
 		t.Fatalf("yield harus 1 per sumber, dapat %v", yields)
 	}
 }
+
+// Negara yang belum mencapai target harus terdeteksi (dasar pass verifikasi tambahan).
+func TestUnmetFromCounts(t *testing.T) {
+	list := []store.CountryCount{
+		{Country: "ID", Alive: 4, TLS: 1},
+		{Country: "SG", Alive: 5, TLS: 5},
+		{Country: "JP", Alive: 0, TLS: 0},
+	}
+	targets := map[string]int{"ID": 5, "SG": 3, "JP": 2, "MY": 3}
+	got := unmetFromCounts(list, targets)
+	want := []string{"ID", "JP", "MY"}
+	if len(got) != len(want) {
+		t.Fatalf("unmet = %v, mau %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unmet = %v, mau %v", got, want)
+		}
+	}
+	if got := unmetFromCounts(list, map[string]int{"SG": 0}); len(got) != 0 {
+		t.Fatalf("target 0 tidak boleh menghasilkan unmet: %v", got)
+	}
+}

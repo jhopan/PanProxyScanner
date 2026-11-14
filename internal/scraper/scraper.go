@@ -44,6 +44,9 @@ type Options struct {
 	RefreshAfter   time.Duration  // umur catatan sebelum diverifikasi ulang
 	MinSources     int            // hanya verifikasi kandidat yang muncul di >= N sumber (0 = semua)
 	CountryTargets map[string]int // target minimal proxy sanggup TLS per negara (kode 2 huruf)
+	CountryTopUp   int            // kandidat tambahan per siklus untuk negara yang belum mencapai target
+	LowYieldCycles int            // siklus tanpa hasil sebelum sumber dimatikan (0 = tidak)
+	LowYieldMin    int            // minimal entri agar sebuah sumber dinilai yield-nya
 
 	// UpdateSourceHealth menyalakan pencatatan kesehatan sumber; SourceHealthLimit adalah
 	// berapa kali kosong berturut-turut sebelum sumber dimatikan otomatis (0 = tidak dimatikan).
@@ -248,7 +251,7 @@ func Run(ctx context.Context, st *store.Store, opts Options, sink Sink) ([]Sourc
 			if stat.Optional {
 				continue
 			}
-			off, err := st.UpdateSourceHealth(stat.Name, stat.Count, stat.Error, opts.SourceHealthLimit)
+			off, err := st.UpdateSourceHealth(stat.Name, stat.Count, stat.Error, opts.SourceHealthLimit, opts.LowYieldCycles, opts.LowYieldMin)
 			if err == nil && off {
 				autoDisabled = append(autoDisabled, stat.Name)
 			}
@@ -309,7 +312,55 @@ func Run(ctx context.Context, st *store.Store, opts Options, sink Sink) ([]Sourc
 		report(sink, func(p *Progress) { p.Refreshed = refreshed })
 	}
 
+	// 5. Pass tambahan untuk negara yang stok TLS-nya belum mencapai target: verifikasi ulang
+	//    baris lokal berlabel negara itu (budget terpisah, jadi tidak memakan jatah utama).
+	if opts.CountryTopUp > 0 {
+		unmet := unmetCountries(st, opts.CountryTargets)
+		if len(unmet) > 0 {
+			report(sink, func(p *Progress) { p.Phase = "target negara" })
+			log.Printf("target negara belum terpenuhi: %s — verifikasi tambahan maks %d", strings.Join(unmet, ","), opts.CountryTopUp)
+			extra, err := st.ThinCountryCandidates(unmet, opts.CountryTopUp, opts.RefreshAfter)
+			if err == nil && len(extra) > 0 {
+				filled, _, verr := verifyAll(ctx, st, extra, counts, countries, origin, opts, sink)
+				if verr != nil {
+					return stats, verr
+				}
+				report(sink, func(p *Progress) { p.Refreshed += filled })
+			}
+		}
+	}
+
 	return stats, nil
+}
+
+// unmetCountries mengembalikan kode negara yang stok TLS-nya masih di bawah targetnya. Hanya
+// negara yang targetnya eksplisit di pengaturan yang masuk sini (bagian murni bisa diuji
+// tanpa database lewat unmetFromCounts).
+func unmetCountries(st *store.Store, targets map[string]int) []string {
+	list, err := st.Countries(true)
+	if err != nil {
+		return nil
+	}
+	return unmetFromCounts(list, targets)
+}
+
+func unmetFromCounts(list []store.CountryCount, targets map[string]int) []string {
+	counts := make(map[string]int, len(list))
+	for _, c := range list {
+		counts[strings.ToUpper(strings.TrimSpace(c.Country))] = c.TLS
+	}
+	out := make([]string, 0, len(targets))
+	for code, target := range targets {
+		key := strings.ToUpper(strings.TrimSpace(code))
+		if len(key) != 2 || target <= 0 {
+			continue
+		}
+		if counts[key] < target {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // fetchAll mengunduh semua sumber paralel dan menggabungkan hasilnya, termasuk kode negara
@@ -749,6 +800,11 @@ func OptionsFromSettings(cfg settings.Settings) Options {
 	opts.UpdateSourceHealth = cfg.AutoDisableSources
 	opts.SourceHealthLimit = cfg.ZeroStreakLimit
 	opts.CountryTargets = cfg.CountryTargets
+	opts.CountryTopUp = cfg.CountryTopUp
+	if cfg.AutoDisableLowYield {
+		opts.LowYieldCycles = cfg.LowYieldCycles
+		opts.LowYieldMin = cfg.LowYieldMinEntries
+	}
 	return opts
 }
 

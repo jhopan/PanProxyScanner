@@ -244,3 +244,78 @@ func TestCountriesCountsTLS(t *testing.T) {
 	}
 	t.Fatalf("negara ID tidak muncul di hasil: %+v", list)
 }
+
+// Sumber yang berkali-kali memberi entri tapi nol hasil harus dimatikan otomatis; yang pernah
+// menghasilkan tetap hidup. Inilah yang membuang daftar mass-scan (ratusan ribu entri, nol hasil).
+func TestLowYieldAutoDisable(t *testing.T) {
+	st := openTest(t)
+	if err := st.EnsureSources([]SourceSeed{
+		{Name: "junk", URL: "https://junk.test/list"},
+		{Name: "good", URL: "https://good.test/list"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddSourceYield("good", 3); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := st.UpdateSourceHealth("junk", 500, "", 0, 5, 50); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.UpdateSourceHealth("good", 10, "", 0, 5, 50); err != nil {
+			t.Fatal(err)
+		}
+	}
+	health, err := st.SourceHealthList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health["junk"].Enabled || !health["junk"].AutoDisabled {
+		t.Fatal("sumber nol-hasil setelah 5 siklus harus dimatikan (auto_disabled)")
+	}
+	if !health["good"].Enabled {
+		t.Fatal("sumber yang pernah menghasilkan tidak boleh dimatikan")
+	}
+}
+
+// Kandidat per negara untuk pass tambahan: hanya baris yang belum terbukti TLS.
+func TestThinCountryCandidates(t *testing.T) {
+	st := openTest(t)
+	if err := st.RecordAlive("1.1.1.1", 1080, "socks5", "ID", 900, 2, false, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordAlive("2.2.2.2", 1080, "socks5", "ID", 700, 2, true, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordAlive("3.3.3.3", 1080, "socks5", "SG", 500, 2, false, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.ThinCountryCandidates([]string{"ID"}, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "1.1.1.1:1080" {
+		t.Fatalf("hanya baris ID tanpa TLS yang boleh terpilih, dapat %v", got)
+	}
+}
+
+// Daftar besar (mis. 100k entri) yang nol hasil cukup dinilai setelah 2 siklus: itu tanda
+// daftar mass-scan, bukan sumber kecil yang kebetulan belum beruntung.
+func TestBigZeroYieldDisabledFast(t *testing.T) {
+	st := openTest(t)
+	if err := st.EnsureSources([]SourceSeed{{Name: "huge", URL: "https://huge.test/list"}}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := st.UpdateSourceHealth("huge", 100000, "", 0, 5, 50); err != nil {
+			t.Fatal(err)
+		}
+	}
+	health, err := st.SourceHealthList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health["huge"].Enabled {
+		t.Fatal("daftar besar tanpa hasil harus dimatikan setelah 2 siklus")
+	}
+}

@@ -186,6 +186,8 @@ CREATE TABLE IF NOT EXISTS sources (
 		// yield_ok: berapa proxy dari sumber ini yang benar-benar lolos (hidup + sanggup TLS).
 		// Sumber yang banyak entri tapi selalu nol hasil terlihat dari sini.
 		{"yield_ok", `ALTER TABLE sources ADD COLUMN yield_ok INTEGER NOT NULL DEFAULT 0`},
+		// cycles: berapa kali sumber ini sudah diambil; dasar penilaian yield (bukan sekadar kosong).
+		{"cycles", `ALTER TABLE sources ADD COLUMN cycles INTEGER NOT NULL DEFAULT 0`},
 		{"auto_disabled", `ALTER TABLE sources ADD COLUMN auto_disabled INTEGER NOT NULL DEFAULT 0`},
 		{"last_error", `ALTER TABLE sources ADD COLUMN last_error TEXT`},
 	} {
@@ -317,12 +319,34 @@ type SourceHealth struct {
 // UpdateSourceHealth mencatat hasil satu sumber pada siklus terakhir dan mematikan otomatis
 // sumber yang berkali-kali tidak menghasilkan proxy. Mengembalikan daftar sumber yang baru
 // dimatikan otomatis.
-func (s *Store) UpdateSourceHealth(name string, count int, errText string, zeroStreakLimit int) (bool, error) {
+// UpdateSourceHealth mencatat kesehatan sumber. Selain "kosong berkali-kali", sumber yang
+// berkali-kali memberi entri TAPI tidak pernah menghasilkan proxy yang lolos verifikasi juga
+// dimatikan — itu tanda daftar mass-scan (ratusan ribu entri, hampir semuanya mati).
+// Sumber yang dimatikan tetap bisa dinyalakan lagi dari halaman Sumber.
+func (s *Store) UpdateSourceHealth(name string, count int, errText string, zeroStreakLimit, lowYieldCycles, lowYieldMinEntries int) (bool, error) {
 	var err error
 	autoDisabled := false
 	if count > 0 {
-		_, err = s.db.Exec(`UPDATE sources SET last_count = ?, zero_streak = 0, last_error = NULL WHERE name = ?`, count, name)
-		return false, err
+		_, err = s.db.Exec(`UPDATE sources SET last_count = ?, zero_streak = 0, cycles = cycles + 1, last_error = NULL WHERE name = ?`, count, name)
+		if err != nil {
+			return false, err
+		}
+		if lowYieldCycles > 0 && lowYieldMinEntries > 0 {
+			// Dinilai hanya kalau sumbernya memang rutin memberi entri; sumber kecil yang
+			// kebetulan belum menghasilkan tidak dihukum.
+			res, err := s.db.Exec(`
+UPDATE sources SET enabled = 0, auto_disabled = 1
+WHERE name = ? AND optional = 0 AND auto_disabled = 0
+  AND ((cycles >= ? AND last_count >= ? AND yield_ok = 0)
+       OR (cycles >= 2 AND last_count >= 5000 AND yield_ok = 0))`, name, lowYieldCycles, lowYieldMinEntries)
+			if err != nil {
+				return false, err
+			}
+			if n, _ := res.RowsAffected(); n > 0 {
+				return true, nil
+			}
+		}
+		return false, nil
 	}
 	_, err = s.db.Exec(`UPDATE sources SET last_count = 0, zero_streak = zero_streak + 1, last_error = ? WHERE name = ?`, errText, name)
 	if err != nil {
@@ -657,6 +681,50 @@ func (s *Store) SourceYields() (map[string]int, error) {
 			return nil, err
 		}
 		out[name] = n
+	}
+	return out, rows.Err()
+}
+
+// ThinCountryCandidates mengambil baris tersimpan dari negara tertentu yang belum terbukti
+// sanggup TLS, untuk diverifikasi ulang. Dipakai pass tambahan per negara: tanpa ini, negara
+// yang stoknya tipis hanya bergantung pada kandidat baru yang kebetulan berlabel negara itu.
+func (s *Store) ThinCountryCandidates(countries []string, limit int, olderThan time.Duration) ([]string, error) {
+	if len(countries) == 0 || limit <= 0 {
+		return nil, nil
+	}
+	codes := make([]string, 0, len(countries))
+	args := make([]any, 0, len(countries)+3)
+	for _, code := range countries {
+		code = strings.ToUpper(strings.TrimSpace(code))
+		if len(code) != 2 {
+			continue
+		}
+		codes = append(codes, code)
+		args = append(args, code)
+	}
+	if len(codes) == 0 {
+		return nil, nil
+	}
+	mark := strings.TrimSuffix(strings.Repeat("?,", len(codes)), ",")
+	query := "SELECT ip, port FROM proxies WHERE tls_ok = 0 AND country IN (" + mark + ")"
+	if olderThan > 0 {
+		query += " AND (last_checked IS NULL OR last_checked < ?)"
+		args = append(args, time.Now().Add(-olderThan).UTC().Format(time.RFC3339))
+	}
+	query += " ORDER BY last_checked IS NULL DESC, last_checked ASC LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]string, 0, limit)
+	for rows.Next() {
+		var ip, port string
+		if err := rows.Scan(&ip, &port); err != nil {
+			return nil, err
+		}
+		out = append(out, ip+":"+port)
 	}
 	return out, rows.Err()
 }

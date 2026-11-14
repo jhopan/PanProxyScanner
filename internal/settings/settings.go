@@ -18,41 +18,45 @@ import (
 
 // Settings adalah konfigurasi yang bisa diubah tanpa restart.
 type Settings struct {
-	Auto                bool           `json:"auto"`                  // siklus otomatis aktif
-	IntervalMinutes     int            `json:"interval_minutes"`      // jarak antar siklus (mode interval)
-	ScheduleMode        string         `json:"schedule_mode"`         // "interval" atau "daily"
-	DailyAt             string         `json:"daily_at"`              // "HH:MM" untuk mode daily (waktu lokal)
-	PipelineEnabled     bool           `json:"pipeline_enabled"`      // siklus otomatis menjalankan pipeline penuh
-	PipelinePullLimit   int            `json:"pipeline_pull_limit"`   // baris Supabase yang diuji di awal pipeline (0 = pakai supabase_pull_limit)
-	PipelinePushLimit   int            `json:"pipeline_push_limit"`   // proxy yang dikirim ke Supabase di akhir pipeline
-	ProbeTLS            bool           `json:"probe_tls"`             // uji tambahan tunnel 443 dengan TLS terverifikasi
-	ProbeAlt            bool           `json:"probe_alt"`             // uji tambahan port non-standar (8443/2053)
-	PushRequireTLS      bool           `json:"push_require_tls"`      // hanya kirim proxy yang sanggup TLS 443 ke Supabase
-	SupabasePruneDays   int            `json:"supabase_prune_days"`   // hapus baris mati di Supabase yang lebih tua dari N hari (0 = tidak)
-	AutoDisableSources  bool           `json:"auto_disable_sources"`  // matikan sumber yang berkali-kali kosong
-	ZeroStreakLimit     int            `json:"zero_streak_limit"`     // berapa kali kosong berturut-turut sebelum dimatikan
-	AutoRotate          bool           `json:"auto_rotate"`           // geser slice tiap siklus
-	Cap                 int            `json:"cap"`                   // kandidat baru per siklus
-	Jobs                int            `json:"jobs"`                  // verifikasi paralel
-	MinSources          int            `json:"min_sources"`           // hanya kandidat muncul di >= N sumber
-	RefreshLimit        int            `json:"refresh_limit"`         // baris lama yang diverifikasi ulang
-	RefreshAfterMinutes int            `json:"refresh_after_minutes"` // umur catatan sebelum diverifikasi ulang
-	FreshMinutes        int            `json:"fresh_minutes"`         // jendela kesegaran statistik/API
-	PurgeDeadHours      int            `json:"purge_dead_hours"`      // hapus catatan mati lebih tua dari N jam (0 = tidak)
-	AdminUser           string         `json:"admin_user"`            // user untuk login website
-	AdminPasswordHash   string         `json:"admin_password_hash"`   // SHA-256 hex; tidak pernah dikirim ke klien
-	PublicURL           string         `json:"public_url"`            // URL publik (mis. hasil CF Tunnel), opsional
-	TunnelName          string         `json:"tunnel_name"`           // nama tunnel Cloudflare
-	TunnelDomain        string         `json:"tunnel_domain"`         // domain yang diarahkan ke panel
-	SupabaseURL         string         `json:"supabase_url"`          // URL project Supabase (untuk sinkron proxy_pool)
-	SupabaseKey         string         `json:"supabase_key"`          // anon/service key Supabase
-	SupabaseTable       string         `json:"supabase_table"`        // tabel tujuan (default proxy_pool)
-	SupabaseAutoPush    bool           `json:"supabase_auto_push"`    // dorong hasil siklus ke Supabase otomatis
-	SupabasePullLimit   int            `json:"supabase_pull_limit"`   // baris Supabase yang diverifikasi ulang per siklus (0 = tidak)
-	CountryTargets      map[string]int `json:"country_targets"`       // target minimal proxy sanggup TLS per negara (kode 2 huruf)
-	ScheduleTimezone    string         `json:"schedule_timezone"`     // zona waktu untuk daily_at, mis. Asia/Makassar (WITA)
-	TestIntervalHours   int            `json:"test_interval_hours"`   // uji ulang berkala (jam); 0 = mati
-	Token               string         `json:"token,omitempty"`       // kalau diisi, API wajib token (untuk klien mesin)
+	Auto                bool           `json:"auto"`                   // siklus otomatis aktif
+	IntervalMinutes     int            `json:"interval_minutes"`       // jarak antar siklus (mode interval)
+	ScheduleMode        string         `json:"schedule_mode"`          // "interval" atau "daily"
+	DailyAt             string         `json:"daily_at"`               // "HH:MM" untuk mode daily (waktu lokal)
+	PipelineEnabled     bool           `json:"pipeline_enabled"`       // siklus otomatis menjalankan pipeline penuh
+	PipelinePullLimit   int            `json:"pipeline_pull_limit"`    // baris Supabase yang diuji di awal pipeline (0 = pakai supabase_pull_limit)
+	PipelinePushLimit   int            `json:"pipeline_push_limit"`    // proxy yang dikirim ke Supabase di akhir pipeline
+	ProbeTLS            bool           `json:"probe_tls"`              // uji tambahan tunnel 443 dengan TLS terverifikasi
+	ProbeAlt            bool           `json:"probe_alt"`              // uji tambahan port non-standar (8443/2053)
+	PushRequireTLS      bool           `json:"push_require_tls"`       // hanya kirim proxy yang sanggup TLS 443 ke Supabase
+	SupabasePruneDays   int            `json:"supabase_prune_days"`    // hapus baris mati di Supabase yang lebih tua dari N hari (0 = tidak)
+	AutoDisableSources  bool           `json:"auto_disable_sources"`   // matikan sumber yang berkali-kali kosong
+	ZeroStreakLimit     int            `json:"zero_streak_limit"`      // berapa kali kosong berturut-turut sebelum dimatikan
+	AutoRotate          bool           `json:"auto_rotate"`            // geser slice tiap siklus
+	Cap                 int            `json:"cap"`                    // kandidat baru per siklus
+	Jobs                int            `json:"jobs"`                   // verifikasi paralel
+	MinSources          int            `json:"min_sources"`            // hanya kandidat muncul di >= N sumber
+	RefreshLimit        int            `json:"refresh_limit"`          // baris lama yang diverifikasi ulang
+	RefreshAfterMinutes int            `json:"refresh_after_minutes"`  // umur catatan sebelum diverifikasi ulang
+	FreshMinutes        int            `json:"fresh_minutes"`          // jendela kesegaran statistik/API
+	PurgeDeadHours      int            `json:"purge_dead_hours"`       // hapus catatan mati lebih tua dari N jam (0 = tidak)
+	AdminUser           string         `json:"admin_user"`             // user untuk login website
+	AdminPasswordHash   string         `json:"admin_password_hash"`    // SHA-256 hex; tidak pernah dikirim ke klien
+	PublicURL           string         `json:"public_url"`             // URL publik (mis. hasil CF Tunnel), opsional
+	TunnelName          string         `json:"tunnel_name"`            // nama tunnel Cloudflare
+	TunnelDomain        string         `json:"tunnel_domain"`          // domain yang diarahkan ke panel
+	SupabaseURL         string         `json:"supabase_url"`           // URL project Supabase (untuk sinkron proxy_pool)
+	SupabaseKey         string         `json:"supabase_key"`           // anon/service key Supabase
+	SupabaseTable       string         `json:"supabase_table"`         // tabel tujuan (default proxy_pool)
+	SupabaseAutoPush    bool           `json:"supabase_auto_push"`     // dorong hasil siklus ke Supabase otomatis
+	SupabasePullLimit   int            `json:"supabase_pull_limit"`    // baris Supabase yang diverifikasi ulang per siklus (0 = tidak)
+	CountryTargets      map[string]int `json:"country_targets"`        // target minimal proxy sanggup TLS per negara (kode 2 huruf)
+	ScheduleTimezone    string         `json:"schedule_timezone"`      // zona waktu untuk daily_at, mis. Asia/Makassar (WITA)
+	TestIntervalHours   int            `json:"test_interval_hours"`    // uji ulang berkala (jam); 0 = mati
+	AutoDisableLowYield bool           `json:"auto_disable_low_yield"` // matikan sumber yang selalu nol hasil
+	LowYieldCycles      int            `json:"low_yield_cycles"`       // berapa siklus tanpa hasil sebelum dimatikan
+	LowYieldMinEntries  int            `json:"low_yield_min_entries"`  // minimal entri agar sumber dinilai
+	CountryTopUp        int            `json:"country_top_up"`         // kandidat tambahan per siklus untuk negara di bawah target
+	Token               string         `json:"token,omitempty"`        // kalau diisi, API wajib token (untuk klien mesin)
 }
 
 // DefaultCountryTargets adalah target awal stok per negara. Negara di sini didahulukan
@@ -111,6 +115,10 @@ func Default() Settings {
 		CountryTargets:      DefaultCountryTargets(),
 		ScheduleTimezone:    "Asia/Makassar", // WITA: 08:00 di sini = 00:00 UTC
 		TestIntervalHours:   6,
+		AutoDisableLowYield: true,
+		LowYieldCycles:      5,
+		LowYieldMinEntries:  50,
+		CountryTopUp:        300,
 	}
 }
 
@@ -213,6 +221,21 @@ func (s *Settings) Normalize() {
 	}
 	if s.TestIntervalHours > 24 {
 		s.TestIntervalHours = 24
+	}
+	if s.LowYieldCycles < 4 {
+		s.LowYieldCycles = 4
+	}
+	if s.LowYieldCycles > 50 {
+		s.LowYieldCycles = 50
+	}
+	if s.LowYieldMinEntries < 10 {
+		s.LowYieldMinEntries = 10
+	}
+	if s.CountryTopUp < 0 {
+		s.CountryTopUp = 0
+	}
+	if s.CountryTopUp > 5000 {
+		s.CountryTopUp = 5000
 	}
 	if s.CountryTargets == nil {
 		s.CountryTargets = DefaultCountryTargets()
