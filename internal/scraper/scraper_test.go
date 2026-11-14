@@ -2,8 +2,10 @@ package scraper
 
 import (
 	"context"
+	"github.com/jhopan/Pan-ProxyScanner/internal/settings"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jhopan/Pan-ProxyScanner/internal/store"
 )
@@ -189,5 +191,30 @@ func TestRunLocalOnly(t *testing.T) {
 	}
 	if len(stats) != 0 {
 		t.Fatalf("LocalOnly tidak mengambil sumber, stats harus kosong: %d", len(stats))
+	}
+}
+
+// Penanda scrape harian: tanpa penanda -> jalan; setelah ditandai hari ini -> tidak; penanda
+// kemarin -> jalan lagi (catch-up saat proses sempat mati).
+func TestNeedsDailyRun(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "d.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s := NewScheduler(nil, settings.Settings{})
+	s.Store = st
+	if !s.needsDailyRun() {
+		t.Fatal("tanpa penanda, scrape penuh harus dianggap perlu")
+	}
+	s.markDailyRun()
+	if s.needsDailyRun() {
+		t.Fatal("setelah ditandai hari ini, tidak boleh jalan lagi")
+	}
+	if err := st.SetMeta(metaLastFull, time.Now().UTC().Add(-24*time.Hour).Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	if !s.needsDailyRun() {
+		t.Fatal("penanda kemarin harus memicu scrape penuh lagi")
 	}
 }

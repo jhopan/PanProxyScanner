@@ -943,7 +943,12 @@ func (s *Scheduler) RunScheduled(testOnly bool) {
 	if testOnly {
 		// Uji berkala: hanya menguji ulang yang sudah tersimpan + push bukti terbaru.
 		if s.Pipeline == nil {
-			log.Printf("jadwal tes: pipeline belum disiapkan, dilewati")
+			// Tanpa pipeline: cek lokal tetap dijalankan lewat runner (tanpa ambil sumber).
+			opts := OptionsFromSettings(cfg)
+			opts.LocalOnly = true
+			if err := s.runner.Start(opts); err != nil {
+				log.Printf("cek lokal: siklus lain masih jalan, dilewati")
+			}
 			return
 		}
 		if err := s.Pipeline(true); err != nil {
