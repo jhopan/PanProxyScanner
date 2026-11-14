@@ -355,6 +355,8 @@ verifikasi dari browser.
   proxy ini dari mesin scanner". Baris yang di edge terbukti mati tetap ditahan. Kolom bukti host
   ditambahkan lewat `cfvpn-hub/sql/2026-11-14-tunnel-host-columns.sql` (untuk project lama:
   `docs/supabase-policies.sql`); kalau belum dijalankan, push tetap jalan tanpa kolom itu.
+  Penghapusan baris mati (prune) memakai `supabase_service_key` karena anon tidak lagi diberi
+  DELETE pada `proxy_pool`; tanpa key itu prune menjawab `deleted: 0` + catatan, bukan error.
 - **Target per negara** `country_targets` (contoh `{"ID": 5, "SG": 3}`) mengatur **urutan**
   verifikasi: negara yang stok TLS-nya di bawah target didahulukan. Semua negara tetap
   di-scrape, dan setiap baris punya kategori `country`.

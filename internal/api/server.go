@@ -216,6 +216,19 @@ func (s *Server) supabaseClient() *supabase.Client {
 	return supabase.New(cfg.SupabaseURL, cfg.SupabaseKey, cfg.SupabaseTable)
 }
 
+// supabaseDeleteClient membuat klien dengan `supabase_service_key` — hanya untuk operasi
+// hapus. Panel CFVPN tidak lagi memberi anon izin DELETE pada proxy_pool, jadi prune wajib
+// memakai service key. Push/pull tetap memakai `supabase_key` supaya kunci istimewa itu
+// tidak dipakai untuk operasi yang tidak perlu.
+func (s *Server) supabaseDeleteClient() *supabase.Client {
+	cfg := s.currentSettings()
+	return supabase.New(cfg.SupabaseURL, cfg.SupabaseServiceKey, cfg.SupabaseTable)
+}
+
+// pruneNoServiceKeyNote adalah pesan tunggal untuk semua jalur prune saat service key kosong:
+// bukan kegagalan, hanya tidak ada yang bisa dihapus dengan anon key.
+const pruneNoServiceKeyNote = "prune butuh supabase_service_key (service_role key) — tanpa key itu Supabase menolak DELETE ke proxy_pool; push/pull-verify tetap memakai supabase_key"
+
 // handleSupabaseStatus melaporkan konfigurasi + hasil sinkron terakhir. Panggilan cek
 // ke Supabase hanya dilakukan kalau diminta (?test=1) supaya endpoint ini selalu cepat —
 // pemanggilan langsung ke Supabase bisa lambat/terbatas rate.
@@ -230,6 +243,7 @@ func (s *Server) handleSupabaseStatus(w http.ResponseWriter, r *http.Request) {
 		"url":                  cfg.SupabaseURL,
 		"table":                cfg.SupabaseTable,
 		"has_key":              cfg.SupabaseKey != "",
+		"has_service_key":      cfg.SupabaseServiceKey != "",
 		"auto_push":            cfg.SupabaseAutoPush,
 		"pull_limit":           cfg.SupabasePullLimit,
 		"prune_days":           cfg.SupabasePruneDays,
@@ -337,10 +351,21 @@ func (s *Server) handleSupabasePrune(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.syncRun.Unlock()
 
+	// Tanpa service key tidak ada gunanya menembak Supabase: jawab jelas (bukan 5xx)
+	// bahwa prune butuh `supabase_service_key`, dan jangan kirim request apa pun.
+	deleteClient := s.supabaseDeleteClient()
+	if !deleteClient.Configured() {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"deleted": 0, "older_than_days": days, "kandidat_sebelumnya": 0,
+			"note": pruneNoServiceKeyNote,
+		})
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
 	candidates, _ := client.CountDead(ctx, time.Now().Add(-time.Duration(days)*24*time.Hour))
-	deleted, err := s.pruneSupabase(ctx, client, days, limit)
+	deleted, err := s.pruneSupabase(ctx, deleteClient, days, limit)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
@@ -350,8 +375,7 @@ func (s *Server) handleSupabasePrune(w http.ResponseWriter, r *http.Request) {
 		"note": "jalankan berulang sampai deleted 0 kalau kandidat lebih banyak dari limit",
 	}
 	if candidates > 0 && deleted == 0 {
-		payload["note"] = "0 baris terhapus padahal ada kandidat — biasanya policy RLS untuk DELETE belum ada; jalankan docs/supabase-policies.sql di Supabase SQL Editor"
-		payload["hint"] = "butuh policy: create policy ... on proxy_pool for delete to anon using (true);"
+		payload["note"] = "0 baris terhapus padahal ada kandidat — pastikan supabase_service_key berisi service_role key (bukan anon), dan policy DELETE untuk service_role sudah ada: jalankan sql/2026-11-15-pool-prune-service-key.sql di panel"
 	}
 	writeJSON(w, http.StatusOK, payload)
 }
@@ -555,7 +579,8 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 	return sent, skippedEdge, err
 }
 
-// pruneSupabase menghapus baris mati lama di Supabase (housekeeping).
+// pruneSupabase menghapus baris mati lama di Supabase (housekeeping). `client` harus klien
+// dengan service key (lihat supabaseDeleteClient): anon key tidak lagi boleh DELETE.
 func (s *Server) pruneSupabase(ctx context.Context, client *supabase.Client, days, limit int) (int, error) {
 	if days <= 0 {
 		return 0, nil
@@ -875,16 +900,23 @@ func (s *Server) runPipelineLocked(testOnly bool) error {
 	}
 
 	// --- langkah 4: housekeeping baris mati di Supabase ---
+	// DELETE butuh service key (panel tidak lagi memberi anon izin hapus); tanpa key itu
+	// langkah dilewati dengan catatan jelas, bukan dianggap gagal.
 	if !testOnly && client.Configured() && cfg.SupabasePruneDays > 0 {
-		started := time.Now()
-		deleted, err := s.pruneSupabase(ctx, client, cfg.SupabasePruneDays, 2000)
-		step := PipelineStep{Name: "prune baris mati Supabase", OK: err == nil, MS: time.Since(started).Milliseconds(), Counts: map[string]int{"dihapus": deleted, "hari": cfg.SupabasePruneDays}}
-		if err != nil {
-			step.Note = err.Error()
+		deleteClient := s.supabaseDeleteClient()
+		if !deleteClient.Configured() {
+			s.addPipelineStep(PipelineStep{Name: "prune baris mati Supabase", OK: true, Note: pruneNoServiceKeyNote})
 		} else {
-			step.Note = fmt.Sprintf("%d baris mati (> %d hari) dihapus", deleted, cfg.SupabasePruneDays)
+			started := time.Now()
+			deleted, err := s.pruneSupabase(ctx, deleteClient, cfg.SupabasePruneDays, 2000)
+			step := PipelineStep{Name: "prune baris mati Supabase", OK: err == nil, MS: time.Since(started).Milliseconds(), Counts: map[string]int{"dihapus": deleted, "hari": cfg.SupabasePruneDays}}
+			if err != nil {
+				step.Note = err.Error()
+			} else {
+				step.Note = fmt.Sprintf("%d baris mati (> %d hari) dihapus", deleted, cfg.SupabasePruneDays)
+			}
+			s.addPipelineStep(step)
 		}
-		s.addPipelineStep(step)
 	} else {
 		s.addPipelineStep(PipelineStep{Name: "prune baris mati Supabase", OK: true, Note: "dilewati (supabase_prune_days = 0)"})
 	}
@@ -1207,6 +1239,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		TunnelDomain        *string         `json:"tunnel_domain"`
 		SupabaseURL         *string         `json:"supabase_url"`
 		SupabaseKey         *string         `json:"supabase_key"`
+		SupabaseServiceKey  *string         `json:"supabase_service_key"`
 		SupabaseTable       *string         `json:"supabase_table"`
 		SupabaseAutoPush    *bool           `json:"supabase_auto_push"`
 		SupabasePullLimit   *int            `json:"supabase_pull_limit"`
@@ -1290,6 +1323,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if patch.SupabaseKey != nil {
 		cfg.SupabaseKey = *patch.SupabaseKey
 	}
+	if patch.SupabaseServiceKey != nil {
+		cfg.SupabaseServiceKey = *patch.SupabaseServiceKey
+	}
 	if patch.SupabaseTable != nil && strings.TrimSpace(*patch.SupabaseTable) != "" {
 		cfg.SupabaseTable = *patch.SupabaseTable
 	}
@@ -1369,45 +1405,46 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 func publicSettings(cfg settings.Settings) map[string]any {
 	passwordSet := cfg.AdminPasswordHash != settings.DefaultPasswordHash()
 	return map[string]any{
-		"auto":                   cfg.Auto,
-		"interval_minutes":       cfg.IntervalMinutes,
-		"auto_rotate":            cfg.AutoRotate,
-		"cap":                    cfg.Cap,
-		"jobs":                   cfg.Jobs,
-		"min_sources":            cfg.MinSources,
-		"refresh_limit":          cfg.RefreshLimit,
-		"refresh_after_minutes":  cfg.RefreshAfterMinutes,
-		"fresh_minutes":          cfg.FreshMinutes,
-		"purge_dead_hours":       cfg.PurgeDeadHours,
-		"admin_user":             cfg.AdminUser,
-		"admin_password_set":     passwordSet,
-		"public_url":             cfg.PublicURL,
-		"tunnel_name":            cfg.TunnelName,
-		"tunnel_domain":          cfg.TunnelDomain,
-		"supabase_url":           cfg.SupabaseURL,
-		"supabase_key_set":       cfg.SupabaseKey != "",
-		"supabase_table":         cfg.SupabaseTable,
-		"supabase_auto_push":     cfg.SupabaseAutoPush,
-		"supabase_pull_limit":    cfg.SupabasePullLimit,
-		"schedule_mode":          cfg.ScheduleMode,
-		"daily_at":               cfg.DailyAt,
-		"pipeline_enabled":       cfg.PipelineEnabled,
-		"pipeline_pull_limit":    cfg.PipelinePullLimit,
-		"pipeline_push_limit":    cfg.PipelinePushLimit,
-		"probe_tls":              cfg.ProbeTLS,
-		"probe_alt":              cfg.ProbeAlt,
-		"push_require_tls":       cfg.PushRequireTLS,
-		"supabase_prune_days":    cfg.SupabasePruneDays,
-		"auto_disable_sources":   cfg.AutoDisableSources,
-		"zero_streak_limit":      cfg.ZeroStreakLimit,
-		"country_targets":        cfg.CountryTargets,
-		"schedule_timezone":      cfg.ScheduleTimezone,
-		"test_interval_hours":    cfg.TestIntervalHours,
-		"auto_disable_low_yield": cfg.AutoDisableLowYield,
-		"low_yield_cycles":       cfg.LowYieldCycles,
-		"low_yield_min_entries":  cfg.LowYieldMinEntries,
-		"country_top_up":         cfg.CountryTopUp,
-		"token":                  cfg.Token,
+		"auto":                     cfg.Auto,
+		"interval_minutes":         cfg.IntervalMinutes,
+		"auto_rotate":              cfg.AutoRotate,
+		"cap":                      cfg.Cap,
+		"jobs":                     cfg.Jobs,
+		"min_sources":              cfg.MinSources,
+		"refresh_limit":            cfg.RefreshLimit,
+		"refresh_after_minutes":    cfg.RefreshAfterMinutes,
+		"fresh_minutes":            cfg.FreshMinutes,
+		"purge_dead_hours":         cfg.PurgeDeadHours,
+		"admin_user":               cfg.AdminUser,
+		"admin_password_set":       passwordSet,
+		"public_url":               cfg.PublicURL,
+		"tunnel_name":              cfg.TunnelName,
+		"tunnel_domain":            cfg.TunnelDomain,
+		"supabase_url":             cfg.SupabaseURL,
+		"supabase_key_set":         cfg.SupabaseKey != "",
+		"supabase_service_key_set": cfg.SupabaseServiceKey != "",
+		"supabase_table":           cfg.SupabaseTable,
+		"supabase_auto_push":       cfg.SupabaseAutoPush,
+		"supabase_pull_limit":      cfg.SupabasePullLimit,
+		"schedule_mode":            cfg.ScheduleMode,
+		"daily_at":                 cfg.DailyAt,
+		"pipeline_enabled":         cfg.PipelineEnabled,
+		"pipeline_pull_limit":      cfg.PipelinePullLimit,
+		"pipeline_push_limit":      cfg.PipelinePushLimit,
+		"probe_tls":                cfg.ProbeTLS,
+		"probe_alt":                cfg.ProbeAlt,
+		"push_require_tls":         cfg.PushRequireTLS,
+		"supabase_prune_days":      cfg.SupabasePruneDays,
+		"auto_disable_sources":     cfg.AutoDisableSources,
+		"zero_streak_limit":        cfg.ZeroStreakLimit,
+		"country_targets":          cfg.CountryTargets,
+		"schedule_timezone":        cfg.ScheduleTimezone,
+		"test_interval_hours":      cfg.TestIntervalHours,
+		"auto_disable_low_yield":   cfg.AutoDisableLowYield,
+		"low_yield_cycles":         cfg.LowYieldCycles,
+		"low_yield_min_entries":    cfg.LowYieldMinEntries,
+		"country_top_up":           cfg.CountryTopUp,
+		"token":                    cfg.Token,
 	}
 }
 

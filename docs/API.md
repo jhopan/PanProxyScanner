@@ -87,10 +87,13 @@ Isi dulu **URL**, **key**, dan **tabel** di menu **Supabase** (atau lewat `POST 
 | `POST /api/supabase/pull-verify?limit=50&jobs=100` | tarik baris dari Supabase (yang paling lama tidak dicek), verifikasi satu per satu di sini, lalu tulis balik `is_active`/`ping`/`last_checked` — baris yang mati langsung ditandai |
 | `POST /api/supabase/prune?days=7&limit=2000` | hapus baris **mati** yang terakhir dicek lebih dari N hari. Balasan `{ "deleted": N, "kandidat_sebelumnya": M }` |
 
-**Catatan `prune`:** aplikasi memakai anon key, jadi Supabase hanya mengizinkan hapus kalau
-ada policy `for delete to anon`. Jalankan **`docs/supabase-policies.sql`** sekali di Supabase
-SQL Editor; tanpa policy itu `prune` menjawab `deleted: 0` beserta petunjuk (bukan error),
-sedangkan `push`/`pull-verify` tetap normal.
+**Catatan `prune`:** DELETE ke `proxy_pool` butuh **`supabase_service_key`** (service_role key),
+karena panel tidak lagi memberi anon izin hapus. Tanpa key itu `prune` tidak menembak Supabase
+sama sekali dan menjawab `200` dengan `deleted: 0` + `note` bahwa prune butuh
+`supabase_service_key` (bukan error 5xx); `push`/`pull-verify` tetap memakai `supabase_key`
+seperti biasa. Di sisi panel, jalankan migrasi `sql/2026-11-15-pool-prune-service-key.sql`
+(policy DELETE untuk `service_role`); kalau `deleted` tetap 0 padahal ada kandidat, key itu
+kemungkinan bukan service_role key.
 
 Dua hal yang ikut menentukan kualitas push:
 
@@ -136,7 +139,8 @@ Supaya berjalan sendiri tanpa perintah manual, aktifkan di **Scheduler → Supab
 | Field | Arti |
 |---|---|
 | `supabase_url` | URL project (mis. `https://xxxx.supabase.co`) |
-| `supabase_key` | anon atau service key (tidak pernah dikirim balik ke klien; hanya `supabase_key_set: true`) |
+| `supabase_key` | anon key untuk push/pull/select (tidak pernah dikirim balik ke klien; hanya `supabase_key_set: true`) |
+| `supabase_service_key` | service_role key, **hanya** untuk operasi hapus (`prune`); tidak pernah dikirim balik ke klien (hanya `supabase_service_key_set: true`), dan tanpa key ini prune menjawab `deleted: 0` + `note` |
 | `supabase_table` | nama tabel, default `proxy_pool` |
 | `supabase_auto_push` | `true` = setiap siklus selesai, proxy hidup otomatis dikirim ke Supabase |
 | `supabase_pull_limit` | jumlah baris Supabase yang ditarik & diverifikasi tiap siklus (`0` = tidak) |

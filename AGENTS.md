@@ -94,6 +94,11 @@ go build -ldflags "-X main.version=v0.1.0" -o panproxyscanner.exe .
   dijalankan manusia) dan TIDAK boleh tertukar dengan `tunnel_ok`/`tunnel_ms`/`tunnel_checked`
   yang edge-only (diisi cron CFVPN); scanner hanya membaca `tunnel_ok` sebagai penahan
   (`PullEdgeVerdicts`). Kalau kolomnya belum ada, push tetap sukses tanpa kolom itu.
+- **Prune butuh service key**: setelah migrasi `sql/2026-11-15-pool-prune-service-key.sql` (repo
+  cfvpn-hub) mencabut DELETE anon pada `proxy_pool`, penghapusan baris mati memakai setting
+  `supabase_service_key` (service_role; tidak pernah dikembalikan API, hanya
+  `supabase_service_key_set: true`). Tanpa key itu prune menjawab `deleted: 0` + catatan, bukan
+  error; push/pull/select tetap memakai `supabase_key` (anon).
 - **Kegagalan push dibedakan**: hanya HTTP 400 dengan kode PostgREST `PGRST204` / SQLSTATE
   `42703` yang dianggap "kolom belum ada" (lalu kelompok kolom host dilepas, kelompok bukti lama
   dipertahankan). Error lain (5xx, jaringan, 400 kode lain) dikembalikan apa adanya **tanpa**

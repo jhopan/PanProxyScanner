@@ -46,6 +46,7 @@ type Settings struct {
 	TunnelDomain        string         `json:"tunnel_domain"`          // domain yang diarahkan ke panel
 	SupabaseURL         string         `json:"supabase_url"`           // URL project Supabase (untuk sinkron proxy_pool)
 	SupabaseKey         string         `json:"supabase_key"`           // anon/service key Supabase
+	SupabaseServiceKey  string         `json:"supabase_service_key"`   // service_role key, hanya untuk hapus (prune); tidak pernah dikirim ke klien
 	SupabaseTable       string         `json:"supabase_table"`         // tabel tujuan (default proxy_pool)
 	SupabaseAutoPush    bool           `json:"supabase_auto_push"`     // dorong hasil siklus ke Supabase otomatis
 	SupabasePullLimit   int            `json:"supabase_pull_limit"`    // baris Supabase yang diverifikasi ulang per siklus (0 = tidak)
@@ -109,6 +110,7 @@ func Default() Settings {
 		TunnelDomain:        "",
 		SupabaseURL:         "",
 		SupabaseKey:         "",
+		SupabaseServiceKey:  "",
 		SupabaseTable:       "proxy_pool",
 		SupabaseAutoPush:    false,
 		SupabasePullLimit:   0,
@@ -176,6 +178,7 @@ func (s *Settings) Normalize() {
 	s.TunnelDomain = strings.TrimRight(s.TunnelDomain, "/")
 	s.SupabaseURL = strings.TrimRight(strings.TrimSpace(s.SupabaseURL), "/")
 	s.SupabaseKey = strings.TrimSpace(s.SupabaseKey)
+	s.SupabaseServiceKey = strings.TrimSpace(s.SupabaseServiceKey)
 	s.SupabaseTable = strings.TrimSpace(s.SupabaseTable)
 	if s.SupabaseTable == "" {
 		s.SupabaseTable = d.SupabaseTable

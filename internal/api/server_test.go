@@ -450,3 +450,110 @@ func TestRunPipelineSyncReportsFailedStep(t *testing.T) {
 		t.Fatal("status pipeline harus menyimpan pesan error")
 	}
 }
+
+// Prune tanpa service key bukan kegagalan 5xx: balas deleted 0 + alasan, dan jangan
+// menembak Supabase sama sekali — anon key sudah tidak boleh DELETE, jadi request apa pun
+// hanya menambah latensi dan error.
+func TestPruneWithoutServiceKeyExplainsSkip(t *testing.T) {
+	var mu sync.Mutex
+	var methods []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		methods = append(methods, r.Method)
+		mu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	cfg := settings.Default()
+	cfg.SupabaseURL = ts.URL
+	cfg.SupabaseKey = "kunci-anon"
+	srv := &Server{settings: &cfg}
+	rec := httptest.NewRecorder()
+	srv.handleSupabasePrune(rec, httptest.NewRequest(http.MethodPost, "/api/supabase/prune?days=7&limit=10", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prune tanpa service key harus 200, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Deleted int    `json:"deleted"`
+		Note    string `json:"note"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("balasan prune bukan JSON: %v", err)
+	}
+	if payload.Deleted != 0 {
+		t.Fatalf("tanpa service key deleted harus 0, dapat %d", payload.Deleted)
+	}
+	if !strings.Contains(payload.Note, "supabase_service_key") {
+		t.Fatalf("note harus menyebut supabase_service_key, dapat %q", payload.Note)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(methods) != 0 {
+		t.Fatalf("tanpa service key tidak boleh ada request ke Supabase, dapat %v", methods)
+	}
+}
+
+// Prune dengan service key: hitung kandidat (HEAD) tetap memakai anon key, sedangkan
+// operasi hapus (GET id + DELETE) harus membawa `Authorization: Bearer <service key>` —
+// itulah satu-satunya yang diizinkan panel.
+func TestPruneUsesServiceKeyForDelete(t *testing.T) {
+	var mu sync.Mutex
+	var deleteAuth, headAuth, listAuth []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			mu.Lock()
+			headAuth = append(headAuth, r.Header.Get("Authorization"))
+			mu.Unlock()
+			w.Header().Set("Content-Range", "0-0/1")
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet:
+			mu.Lock()
+			listAuth = append(listAuth, r.Header.Get("Authorization"))
+			mu.Unlock()
+			_, _ = w.Write([]byte(`[{"id":"baris-1"}]`))
+		case http.MethodDelete:
+			mu.Lock()
+			deleteAuth = append(deleteAuth, r.Header.Get("Authorization"))
+			mu.Unlock()
+			_, _ = w.Write([]byte(`[{"id":"baris-1"}]`))
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer ts.Close()
+
+	cfg := settings.Default()
+	cfg.SupabaseURL = ts.URL
+	cfg.SupabaseKey = "kunci-anon"
+	cfg.SupabaseServiceKey = "kunci-service"
+	srv := &Server{settings: &cfg}
+	rec := httptest.NewRecorder()
+	srv.handleSupabasePrune(rec, httptest.NewRequest(http.MethodPost, "/api/supabase/prune?days=7&limit=10", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prune harus 200, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Deleted int `json:"deleted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("balasan prune bukan JSON: %v", err)
+	}
+	if payload.Deleted != 1 {
+		t.Fatalf("stub menghapus 1 baris, deleted harus 1, dapat %d", payload.Deleted)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deleteAuth) != 1 || deleteAuth[0] != "Bearer kunci-service" {
+		t.Fatalf("DELETE harus memakai service key, dapat %v", deleteAuth)
+	}
+	if len(listAuth) != 1 || listAuth[0] != "Bearer kunci-service" {
+		t.Fatalf("ambil id yang akan dihapus harus memakai service key, dapat %v", listAuth)
+	}
+	if len(headAuth) == 0 || headAuth[0] != "Bearer kunci-anon" {
+		t.Fatalf("hitung kandidat tetap memakai anon key, dapat %v", headAuth)
+	}
+}

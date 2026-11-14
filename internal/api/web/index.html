@@ -213,6 +213,7 @@
           <div class="row">
             <label>URL project<input id="sbUrl" placeholder="https://xxxx.supabase.co" size="38"></label>
             <label>Key (anon/service)<input id="sbKey" type="password" placeholder="kosongkan bila tidak diganti" size="34"></label>
+            <label>Service key (hanya untuk hapus/prune; opsional)<input id="sbServiceKey" type="password" placeholder="kosongkan bila tidak diganti" size="34"></label>
             <label>Tabel<input id="sbTable" placeholder="proxy_pool" size="14"></label>
             <button class="primary" id="btnSbSave">Simpan</button>
             <button class="ghost" id="btnSbTest">Tes koneksi</button>
@@ -601,6 +602,8 @@ async function loadSupabase() {
   $("sbTable").value = data.table || "proxy_pool";
   $("sbKey").value = "";
   $("sbKey").placeholder = data.has_key ? "sudah diisi (kosongkan bila tidak diganti)" : "anon/service key";
+  $("sbServiceKey").value = "";
+  $("sbServiceKey").placeholder = data.has_service_key ? "sudah diset (kosongkan bila tidak diganti)" : "service_role key (untuk prune)";
   $("sbAuto").value = String(!!data.auto_push);
   $("sbPull").value = data.pull_limit || 0;
   $("sbPruneDays").value = data.prune_days ?? 7;
@@ -612,6 +615,7 @@ async function loadSupabase() {
   const last = data.last_sync ? `${data.last_sync.at} — ${data.last_sync.note}${data.last_sync.error ? " (error: " + data.last_sync.error + ")" : ""}` : "belum ada sinkronisasi";
   $("sbStatus").innerHTML = [
     `status: ${data.configured ? "<b>terkonfigurasi</b>" : "belum diisi"}`,
+    data.has_service_key ? "prune: service key siap" : "prune: butuh service key",
     data.remote_total != null ? `baris di Supabase: <b>${data.remote_total}</b> (aktif ${data.remote_alive})` : "",
     data.remote_error ? `error: ${data.remote_error}` : "",
     `sinkron terakhir: ${last}`,
@@ -632,6 +636,7 @@ async function sbSave() {
     zero_streak_limit: num("sbStreak") || 0,
   };
   if ($("sbKey").value.trim()) patch.supabase_key = $("sbKey").value.trim();
+  if ($("sbServiceKey").value.trim()) patch.supabase_service_key = $("sbServiceKey").value.trim();
   await postSettings(patch, "konfigurasi Supabase disimpan");
   loadSupabase();
 }
@@ -654,7 +659,12 @@ $("btnSbPrune").onclick = async () => {
   const days = num("sbPruneDays") || 7;
   const res = await api("/api/supabase/prune?days=" + days + "&limit=2000", { method: "POST" });
   const data = await res.json();
-  toast(res.ok ? `${data.deleted} baris mati dihapus (dari ${data.kandidat_sebelumnya} kandidat)` : "gagal: " + (data.error || res.status));
+  const info = !res.ok
+    ? "gagal: " + (data.error || res.status)
+    : data.deleted > 0
+      ? `${data.deleted} baris mati dihapus (dari ${data.kandidat_sebelumnya} kandidat)`
+      : (data.note || `${data.deleted} baris mati dihapus (dari ${data.kandidat_sebelumnya} kandidat)`);
+  toast(info);
   loadSupabase();
 };
 $("btnSbPull").onclick = async () => {
