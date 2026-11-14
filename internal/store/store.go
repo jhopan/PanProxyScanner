@@ -183,6 +183,9 @@ CREATE TABLE IF NOT EXISTS sources (
 	for _, col := range []struct{ name, ddl string }{
 		{"last_count", `ALTER TABLE sources ADD COLUMN last_count INTEGER NOT NULL DEFAULT 0`},
 		{"zero_streak", `ALTER TABLE sources ADD COLUMN zero_streak INTEGER NOT NULL DEFAULT 0`},
+		// yield_ok: berapa proxy dari sumber ini yang benar-benar lolos (hidup + sanggup TLS).
+		// Sumber yang banyak entri tapi selalu nol hasil terlihat dari sini.
+		{"yield_ok", `ALTER TABLE sources ADD COLUMN yield_ok INTEGER NOT NULL DEFAULT 0`},
 		{"auto_disabled", `ALTER TABLE sources ADD COLUMN auto_disabled INTEGER NOT NULL DEFAULT 0`},
 		{"last_error", `ALTER TABLE sources ADD COLUMN last_error TEXT`},
 	} {
@@ -308,6 +311,7 @@ type SourceHealth struct {
 	AutoDisabled bool   `json:"auto_disabled"`
 	LastError    string `json:"last_error,omitempty"`
 	Enabled      bool   `json:"enabled"`
+	YieldOK      int    `json:"yield_ok"` // proxy dari sumber ini yang lolos verifikasi
 }
 
 // UpdateSourceHealth mencatat hasil satu sumber pada siklus terakhir dan mematikan otomatis
@@ -341,7 +345,7 @@ WHERE name = ? AND optional = 0 AND auto_disabled = 0 AND zero_streak >= ?`, nam
 
 // SourceHealthList melaporkan kondisi semua sumber.
 func (s *Store) SourceHealthList() (map[string]SourceHealth, error) {
-	rows, err := s.db.Query(`SELECT name, COALESCE(last_count,0), COALESCE(zero_streak,0), COALESCE(auto_disabled,0), COALESCE(last_error,''), enabled FROM sources`)
+	rows, err := s.db.Query(`SELECT name, COALESCE(last_count,0), COALESCE(zero_streak,0), COALESCE(auto_disabled,0), COALESCE(last_error,''), enabled, COALESCE(yield_ok,0) FROM sources`)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +354,7 @@ func (s *Store) SourceHealthList() (map[string]SourceHealth, error) {
 	for rows.Next() {
 		var h SourceHealth
 		var autoDisabled, enabled int
-		if err := rows.Scan(&h.Name, &h.LastCount, &h.ZeroStreak, &autoDisabled, &h.LastError, &enabled); err != nil {
+		if err := rows.Scan(&h.Name, &h.LastCount, &h.ZeroStreak, &autoDisabled, &h.LastError, &enabled, &h.YieldOK); err != nil {
 			return nil, err
 		}
 		h.AutoDisabled = autoDisabled == 1
@@ -624,6 +628,35 @@ func scanProxies(rows *sql.Rows) ([]Proxy, error) {
 		p.TLS = tlsOK == 1
 		p.AltOK = altOK == 1
 		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// AddSourceYield menambah hitungan hasil (proxy yang lolos verifikasi) untuk satu sumber.
+func (s *Store) AddSourceYield(name string, delta int) error {
+	if name == "" || delta == 0 {
+		return nil
+	}
+	_, err := s.db.Exec("UPDATE sources SET yield_ok = yield_ok + ? WHERE name = ?", delta, name)
+	return err
+}
+
+// SourceYields mengembalikan hitungan hasil per sumber (untuk memberi bobot pada kandidat:
+// kandidat dari sumber yang produktif diverifikasi lebih dulu).
+func (s *Store) SourceYields() (map[string]int, error) {
+	rows, err := s.db.Query("SELECT name, COALESCE(yield_ok,0) FROM sources")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]int)
+	for rows.Next() {
+		var name string
+		var n int
+		if err := rows.Scan(&name, &n); err != nil {
+			return nil, err
+		}
+		out[name] = n
 	}
 	return out, rows.Err()
 }

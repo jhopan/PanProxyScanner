@@ -300,12 +300,16 @@ func (s *Server) handleSupabasePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.syncRun.Unlock()
-	pushed, err := s.pushToSupabase(r.Context(), client, cfg, limit)
+	edgeDead, edgeErr := client.PullEdgeVerdicts(r.Context(), 5000)
+	if edgeErr != nil {
+		edgeDead = nil // tabel tanpa kolom tunnel_ok: lanjut tanpa filter edge
+	}
+	pushed, skippedEdge, err := s.pushToSupabase(r.Context(), client, cfg, limit, edgeDead)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"pushed": pushed, "table": client.Table})
+	writeJSON(w, http.StatusOK, map[string]any{"pushed": pushed, "held_edge_dead": skippedEdge, "table": client.Table})
 }
 
 // handleSupabasePrune menghapus baris mati lama di Supabase (housekeeping).
@@ -422,12 +426,14 @@ func exitKey(exitIP string) string {
 //
 // Tanpa langkah turun, baris lama yang sudah terlanjur aktif (ditandai pengecek HTTP
 // dangkal) akan terus dipakai panel dan menghasilkan konfigurasi VLESS yang mati.
-func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cfg settings.Settings, limit int) (int, error) {
+// edgeDead: peta "ip:port" -> verdict edge terakhir. Baris yang di edge terbukti mati tidak
+// dinaikkan lagi, walau verifikasi lokal menganggapnya hidup.
+func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cfg settings.Settings, limit int, edgeDead map[string]bool) (int, int, error) {
 	alive := true
 	fresh := pushFreshMinutes(cfg)
 	promote, err := s.store.List(store.Filter{Alive: &alive, Limit: limit, Order: "score", FreshMinutes: fresh, TLSOnly: cfg.PushRequireTLS})
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	demoteCap := limit
 	if demoteCap < 2000 {
@@ -435,7 +441,7 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 	}
 	candidates, err := s.store.List(store.Filter{Alive: &alive, Limit: demoteCap, Order: "score", FreshMinutes: fresh})
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -445,7 +451,7 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 	// berisi satu orang per IP, bukan lima port dari mesin yang sama.
 	const minOK = 2
 	seenExit := make(map[string]bool, len(promote))
-	skippedYoung, skippedDup := 0, 0
+	skippedYoung, skippedDup, skippedEdge := 0, 0, 0
 	for _, p := range promote {
 		// lewati proxy yang lebih sering gagal daripada berhasil
 		if p.FailCount > p.OKCount {
@@ -453,6 +459,11 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 		}
 		if p.OKCount < minOK {
 			skippedYoung++
+			continue
+		}
+		// Verdict edge lebih kuat: proxy yang di edge terbukti mati tidak boleh naik lagi.
+		if edgeDead[p.IP+":"+strconv.Itoa(p.Port)] {
+			skippedEdge++
 			continue
 		}
 		if key := exitKey(p.ExitIP); key != "" {
@@ -482,9 +493,9 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 	}
 	if len(rows) == 0 {
 		if cfg.PushRequireTLS {
-			return 0, fmt.Errorf("tidak ada proxy hidup yang lolos uji TLS 443 & segar (matikan push_require_tls kalau ingin mengirim proxy HTTP saja)")
+			return 0, skippedEdge, fmt.Errorf("tidak ada proxy hidup yang lolos uji TLS 443 & segar (matikan push_require_tls kalau ingin mengirim proxy HTTP saja)")
 		}
-		return 0, fmt.Errorf("tidak ada proxy hidup & segar di database lokal")
+		return 0, skippedEdge, fmt.Errorf("tidak ada proxy hidup & segar di database lokal")
 	}
 	sent, err := client.Upsert(ctx, rows)
 	if err == nil {
@@ -500,13 +511,16 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 	if skippedDup > 0 {
 		note += fmt.Sprintf(", %d dilewati (exit IP sama)", skippedDup)
 	}
+	if skippedEdge > 0 {
+		note += fmt.Sprintf(", %d ditahan (edge bilang mati)", skippedEdge)
+	}
 	if client.EvidenceColumns() {
 		note += ", kolom tls_ok/alt_ok/exit_ip ikut dikirim"
 	} else {
 		note += ", kolom bukti belum ada di tabel → jalankan docs/supabase-policies.sql"
 	}
 	s.recordSync(note+")", err)
-	return sent, err
+	return sent, skippedEdge, err
 }
 
 // pruneSupabase menghapus baris mati lama di Supabase (housekeeping).
@@ -754,12 +768,20 @@ func (s *Server) RunPipelineMode(testOnly bool) error {
 		// --- langkah 3: push hasil ke Supabase ---
 		if client.Configured() && cfg.PipelinePushLimit > 0 {
 			started := time.Now()
-			pushed, err := s.pushToSupabase(ctx, client, cfg, cfg.PipelinePushLimit)
+			edgeDead, edgeErr := client.PullEdgeVerdicts(ctx, 5000)
+			if edgeErr != nil {
+				edgeDead = nil
+			}
+			pushed, skippedEdge, err := s.pushToSupabase(ctx, client, cfg, cfg.PipelinePushLimit, edgeDead)
 			step := PipelineStep{Name: "push ke Supabase", OK: err == nil, MS: time.Since(started).Milliseconds(), Counts: map[string]int{"dikirim": pushed}}
 			if err != nil {
 				step.Note = err.Error()
 			} else {
 				step.Note = fmt.Sprintf("%d proxy dikirim", pushed)
+				if skippedEdge > 0 {
+					step.Note += fmt.Sprintf(", %d ditahan (edge bilang mati)", skippedEdge)
+				}
+				step.Counts["ditahan_edge_mati"] = skippedEdge
 			}
 			s.addPipelineStep(step)
 		} else {
@@ -903,10 +925,11 @@ func (s *Server) AfterCycle() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
 		if cfg.SupabaseAutoPush {
-			if pushed, err := s.pushToSupabase(ctx, client, cfg, 1000); err != nil {
+			edgeDead, _ := client.PullEdgeVerdicts(ctx, 5000)
+			if pushed, heldEdge, err := s.pushToSupabase(ctx, client, cfg, 1000, edgeDead); err != nil {
 				log.Printf("supabase push gagal: %v", err)
 			} else {
-				log.Printf("supabase: %d proxy didorong", pushed)
+				log.Printf("supabase: %d proxy didorong (%d ditahan: edge bilang mati)", pushed, heldEdge)
 			}
 		}
 		if cfg.SupabasePullLimit > 0 {

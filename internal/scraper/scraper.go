@@ -195,7 +195,7 @@ func (r *Runner) Stop() {
 // kandidat unik. Dipakai subcommand `sources` sebagai alat uji katalog.
 func CheckSources(ctx context.Context, st *store.Store, opts Options) ([]SourceStat, int) {
 	resolveSources(st, &opts)
-	stats, union, _, _ := fetchAll(ctx, opts)
+	stats, union, _, _, _ := fetchAll(ctx, opts)
 	return stats, len(union)
 }
 
@@ -210,7 +210,7 @@ func Run(ctx context.Context, st *store.Store, opts Options, sink Sink) ([]Sourc
 	resolveSources(st, &opts)
 
 	// 1. Ambil semua sumber paralel.
-	stats, union, counts, countries := fetchAll(ctx, opts)
+	stats, union, counts, countries, origin := fetchAll(ctx, opts)
 	report(sink, func(p *Progress) {
 		p.Sources = stats
 		p.Phase = "verify"
@@ -228,7 +228,18 @@ func Run(ctx context.Context, st *store.Store, opts Options, sink Sink) ([]Sourc
 		sort.Strings(codes)
 		log.Printf("stok tipis (didahulukan): %s", strings.Join(codes, ","))
 	}
-	ranked := rank(union, counts, countries, thin, opts.MinSources)
+	// Bobot kandidat: 1 + hasil historis sumber yang mencantumkannya. Kandidat dari sumber
+	// yang produktif diverifikasi lebih dulu, tanpa mengubah cakupan (semua tetap di-scrape).
+	yields, _ := st.SourceYields()
+	weights := make(map[string]int, len(origin))
+	for addr, srcs := range origin {
+		w := len(srcs)
+		for _, name := range srcs {
+			w += yields[name]
+		}
+		weights[addr] = w
+	}
+	ranked := rank(union, counts, weights, countries, thin, opts.MinSources)
 
 	// 2b. Catat kesehatan tiap sumber: yang berkali-kali kosong dimatikan otomatis.
 	if cfgHealth := opts.SourceHealthLimit; cfgHealth > 0 || opts.UpdateSourceHealth {
@@ -273,7 +284,7 @@ func Run(ctx context.Context, st *store.Store, opts Options, sink Sink) ([]Sourc
 		p.Phase = "verify"
 	})
 
-	if _, _, err := verifyAll(ctx, st, fresh, counts, countries, opts, sink); err != nil {
+	if _, _, err := verifyAll(ctx, st, fresh, counts, countries, origin, opts, sink); err != nil {
 		return stats, err
 	}
 
@@ -291,7 +302,7 @@ func Run(ctx context.Context, st *store.Store, opts Options, sink Sink) ([]Sourc
 		for _, s := range stale {
 			addrs = append(addrs, s.Addr())
 		}
-		refreshed, _, err := verifyAll(ctx, st, addrs, counts, countries, opts, sink)
+		refreshed, _, err := verifyAll(ctx, st, addrs, counts, countries, nil, opts, sink)
 		if err != nil {
 			return stats, err
 		}
@@ -303,11 +314,14 @@ func Run(ctx context.Context, st *store.Store, opts Options, sink Sink) ([]Sourc
 
 // fetchAll mengunduh semua sumber paralel dan menggabungkan hasilnya, termasuk kode negara
 // dari sumber JSON yang menyertakan data lokasi.
-func fetchAll(ctx context.Context, opts Options) ([]SourceStat, map[string]struct{}, map[string]int, map[string]string) {
+func fetchAll(ctx context.Context, opts Options) ([]SourceStat, map[string]struct{}, map[string]int, map[string]string, map[string][]string) {
 	client := &http.Client{Timeout: opts.FetchTimeout}
 	union := make(map[string]struct{})
 	counts := make(map[string]int)
 	countries := make(map[string]string)
+	// origin: sumber mana saja yang mencantumkan sebuah kandidat — dipakai untuk atribusi hasil
+	// per sumber (yield) setelah verifikasi.
+	origin := make(map[string][]string)
 	stats := make([]SourceStat, len(opts.SourceList))
 
 	var mu sync.Mutex
@@ -343,6 +357,7 @@ func fetchAll(ctx context.Context, opts Options) ([]SourceStat, map[string]struc
 							for addr := range found {
 								union[addr] = struct{}{}
 								counts[addr]++
+								origin[addr] = append(origin[addr], src.Name)
 							}
 							mu.Unlock()
 
@@ -373,7 +388,7 @@ func fetchAll(ctx context.Context, opts Options) ([]SourceStat, map[string]struc
 		}(i, src)
 	}
 	wg.Wait()
-	return stats, union, counts, countries
+	return stats, union, counts, countries, origin
 }
 
 // rank menyusun urutan kandidat: terbanyak muncul di sumber dulu, lalu port umum.
@@ -420,7 +435,11 @@ func thinCountries(st *store.Store, targets map[string]int) map[string]bool {
 	return thinFromCounts(list, targets)
 }
 
-func rank(union map[string]struct{}, counts map[string]int, countries map[string]string, thin map[string]bool, minSources int) []string {
+func rank(union map[string]struct{}, counts map[string]int, weights map[string]int, countries map[string]string, thin map[string]bool, minSources int) []string {
+	if weights == nil {
+		// Pemanggil yang belum punya data hasil per sumber: bobot = jumlah sumber (perilaku lama).
+		weights = counts
+	}
 	list := make([]string, 0, len(union))
 	for addr := range union {
 		if minSources > 0 && counts[addr] < minSources {
@@ -434,10 +453,10 @@ func rank(union map[string]struct{}, counts map[string]int, countries map[string
 		if ti != tj {
 			return ti
 		}
-		// 2. Muncul di banyak sumber independen = sinyal kualitas.
-		ci, cj := counts[list[i]], counts[list[j]]
-		if ci != cj {
-			return ci > cj
+		// 2. Bobot kandidat (jumlah sumber + hasil historis tiap sumber) = sinyal kualitas.
+		wi, wj := weights[list[i]], weights[list[j]]
+		if wi != wj {
+			return wi > wj
 		}
 		pi, pj := preferredPort(list[i]), preferredPort(list[j])
 		if pi != pj {
@@ -473,7 +492,18 @@ func splitAddr(addr string) (string, string, error) {
 
 // verifyAll memverifikasi daftar alamat dengan pool worker dan menyimpan hasilnya.
 // Progres dilaporkan sebagai delta supaya UI bisa menampilkan total lintas tahap.
-func verifyAll(ctx context.Context, st *store.Store, addrs []string, counts map[string]int, countries map[string]string, opts Options, sink Sink) (int, int, error) {
+// creditSources mencatat hasil ke sumber asal kandidat. Hanya proxy HIDUP dan sanggup TLS yang
+// dihitung: sumber dengan ratusan ribu entri tapi nol hasil akan terlihat dari yield_ok.
+func creditSources(st *store.Store, origin map[string][]string, addr string, tlsOK bool) {
+	if st == nil || !tlsOK {
+		return
+	}
+	for _, name := range origin[addr] {
+		_ = st.AddSourceYield(name, 1)
+	}
+}
+
+func verifyAll(ctx context.Context, st *store.Store, addrs []string, counts map[string]int, countries map[string]string, origin map[string][]string, opts Options, sink Sink) (int, int, error) {
 	if len(addrs) == 0 {
 		return 0, 0, nil
 	}
@@ -542,6 +572,9 @@ func verifyAll(ctx context.Context, st *store.Store, addrs []string, counts map[
 			} else {
 				alive++
 				deltaAlive++
+				// Atribusi hasil ke sumber asalnya: hanya proxy yang HIDUP dan sanggup TLS yang
+				// dihitung, jadi sumber dengan banyak entri tapi nol hasil akan terlihat di yield.
+				creditSources(st, origin, out.addr, out.result.TLS)
 			}
 		} else {
 			if err := st.RecordDead(ip, port, country, srcCount); err != nil {

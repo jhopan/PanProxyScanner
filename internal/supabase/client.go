@@ -32,9 +32,10 @@ type Row struct {
 	// Bukti verifikasi (kolom opsional; lihat docs/supabase-policies.sql). Tidak dikirim
 	// selama kolomnya belum ada di tabel — kalau dikirim, PostgREST membalas 400 dan
 	// seluruh push gagal. Karena itu pointer: "tidak dikirim" dan "false" berbeda.
-	TLSOK  *bool   `json:"tls_ok,omitempty"`
-	AltOK  *bool   `json:"alt_ok,omitempty"`
-	ExitIP *string `json:"exit_ip,omitempty"`
+	TunnelOK *bool   `json:"tunnel_ok,omitempty"` // verdict edge dari cron panel (hanya dibaca)
+	TLSOK    *bool   `json:"tls_ok,omitempty"`
+	AltOK    *bool   `json:"alt_ok,omitempty"`
+	ExitIP   *string `json:"exit_ip,omitempty"`
 }
 
 // EvidenceRow melengkapi baris dengan bukti verifikasi (dipakai kalau kolomnya sudah ada).
@@ -414,4 +415,38 @@ func (c *Client) UpdateVerdict(ctx context.Context, id string, alive bool, pingM
 		return err
 	}
 	return errorFrom(resp, data)
+}
+
+// PullEdgeVerdicts mengambil verdict probe edge (kolom tunnel_ok) yang sudah tercatat.
+// Dipakai push: baris yang TERBUKTI MATI dari edge tidak boleh dinaikkan lagi ke is_active=true
+// hanya karena verifikasi lokal menganggapnya hidup (vantage lokal != vantage Cloudflare).
+func (c *Client) PullEdgeVerdicts(ctx context.Context, limit int) (map[string]bool, error) {
+	if !c.Configured() {
+		return nil, fmt.Errorf("url atau key Supabase belum diisi")
+	}
+	if limit <= 0 {
+		limit = 5000
+	}
+	query := url.Values{}
+	query.Set("select", "ip,port,tunnel_ok")
+	query.Set("tunnel_ok", "not.is.null")
+	query.Set("limit", strconv.Itoa(limit))
+	resp, body, err := c.do(ctx, http.MethodGet, c.endpoint("?"+query.Encode()), nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("pull verdict HTTP %d", resp.StatusCode)
+	}
+	var rows []Row
+	if err := json.Unmarshal(body, &rows); err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		if row.TunnelOK != nil {
+			out[row.IP+":"+row.Port] = *row.TunnelOK
+		}
+	}
+	return out, nil
 }

@@ -76,6 +76,17 @@ var All = []Source{
 	{Name: "proxy-list-download-http", Kind: "api", Optional: true, URL: "https://www.proxy-list.download/api/v1/get?type=http"},
 	{Name: "geonode", Kind: "api", URL: "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&protocols=socks5,http"},
 	{Name: "spys-me-proxy", Kind: "txt", URL: "https://spys.me/proxy.txt"},
+	// --- API per-negara (kandidat langsung berlabel negara) ---------------------------------
+	// Sumber ini penting untuk negara prioritas: kandidatnya sudah membawa kode negara, jadi
+	// target per negara di halaman Pengaturan bisa memprioritaskan verifikasinya. Sumber umum
+	// di atas tidak punya label negara — kandidatnya baru ketahuan negaranya setelah diverifikasi.
+	{Name: "geonode-id", Kind: "api", URL: "https://proxylist.geonode.com/api/proxy-list?limit=200&page=1&sort_by=lastChecked&sort_type=desc&country=ID"},
+	{Name: "geonode-sg", Kind: "api", URL: "https://proxylist.geonode.com/api/proxy-list?limit=200&page=1&sort_by=lastChecked&sort_type=desc&country=SG"},
+	{Name: "geonode-my", Kind: "api", URL: "https://proxylist.geonode.com/api/proxy-list?limit=200&page=1&sort_by=lastChecked&sort_type=desc&country=MY"},
+	{Name: "geonode-jp", Kind: "api", URL: "https://proxylist.geonode.com/api/proxy-list?limit=200&page=1&sort_by=lastChecked&sort_type=desc&country=JP"},
+	{Name: "geonode-hk", Kind: "api", URL: "https://proxylist.geonode.com/api/proxy-list?limit=200&page=1&sort_by=lastChecked&sort_type=desc&country=HK"},
+	{Name: "geonode-kr", Kind: "api", URL: "https://proxylist.geonode.com/api/proxy-list?limit=200&page=1&sort_by=lastChecked&sort_type=desc&country=KR"},
+
 	{Name: "spys-me-socks", Kind: "txt", URL: "https://spys.me/socks.txt"},
 	{Name: "proxyspace-socks5", Kind: "txt", URL: "https://proxyspace.pro/socks5.txt"},
 	{Name: "proxyspace-http", Kind: "txt", URL: "https://proxyspace.pro/http.txt"},

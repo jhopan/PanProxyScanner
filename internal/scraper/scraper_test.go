@@ -1,6 +1,7 @@
 package scraper
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/jhopan/Pan-ProxyScanner/internal/store"
@@ -53,18 +54,18 @@ func TestRankPrefersMultiSource(t *testing.T) {
 	}
 	counts := map[string]int{"1.1.1.1:1080": 1, "2.2.2.2:55555": 5, "3.3.3.3:4145": 3}
 
-	order := rank(union, counts, nil, nil, 0)
+	order := rank(union, counts, nil, nil, nil, 0)
 	if len(order) != 3 || order[0] != "2.2.2.2:55555" || order[1] != "3.3.3.3:4145" {
 		t.Fatalf("rank harus urut jumlah sumber: %v", order)
 	}
 	// sumber sama banyak → port umum menang
 	tie := rank(map[string]struct{}{"4.4.4.4:55555": {}, "5.5.5.5:1080": {}},
-		map[string]int{"4.4.4.4:55555": 2, "5.5.5.5:1080": 2}, nil, nil, 0)
+		map[string]int{"4.4.4.4:55555": 2, "5.5.5.5:1080": 2}, nil, nil, nil, 0)
 	if len(tie) != 2 || tie[0] != "5.5.5.5:1080" {
 		t.Fatalf("port umum harus didahulukan saat seri: %v", tie)
 	}
 	// minSources menyaring kandidat ber-sumber sedikit
-	filtered := rank(union, counts, nil, nil, 2)
+	filtered := rank(union, counts, nil, nil, nil, 2)
 	for _, addr := range filtered {
 		if addr == "1.1.1.1:1080" {
 			t.Fatalf("kandidat dengan 1 sumber harus tersaring: %v", filtered)
@@ -82,13 +83,13 @@ func TestRankPrefersThinCountries(t *testing.T) {
 	counts := map[string]int{"1.1.1.1:1080": 5, "2.2.2.2:34567": 1, "3.3.3.3:1080": 1}
 	countries := map[string]string{"2.2.2.2:34567": "ID", "3.3.3.3:1080": "US"}
 
-	got := rank(union, counts, countries, map[string]bool{"ID": true}, 0)
+	got := rank(union, counts, counts, countries, map[string]bool{"ID": true}, 0)
 	if got[0] != "2.2.2.2:34567" {
 		t.Fatalf("kandidat negara tipis harus lebih dulu, dapat %v", got)
 	}
 
 	// Tanpa negara tipis, urutan kembali ke jumlah sumber (sinyal kualitas).
-	got = rank(union, counts, countries, map[string]bool{}, 0)
+	got = rank(union, counts, counts, countries, map[string]bool{}, 0)
 	if got[0] != "1.1.1.1:1080" {
 		t.Fatalf("tanpa prioritas, kandidat terbanyak-sumber harus lebih dulu, dapat %v", got)
 	}
@@ -121,5 +122,27 @@ func TestThinFromCounts(t *testing.T) {
 	// Negara bertarget tapi belum punya baris sama sekali tetap tipis.
 	if !thin["MY"] && !thin["ID"] {
 		t.Fatal("negara bertarget khusus harus dianggap tipis minimal saat stok kurang")
+	}
+}
+
+// Atribusi hasil: hanya proxy hidup+TLS yang menambah yield sumber asalnya.
+func TestCreditSources(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "y.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.EnsureSources([]store.SourceSeed{{Name: "src-a", URL: "https://a.test/list"}, {Name: "src-b", URL: "https://b.test/list"}}); err != nil {
+		t.Fatal(err)
+	}
+	origin := map[string][]string{"1.2.3.4:1080": {"src-a", "src-b"}}
+	creditSources(st, origin, "1.2.3.4:1080", true)
+	creditSources(st, origin, "1.2.3.4:1080", false) // tidak dihitung: bukan TLS
+	yields, err := st.SourceYields()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if yields["src-a"] != 1 || yields["src-b"] != 1 {
+		t.Fatalf("yield harus 1 per sumber, dapat %v", yields)
 	}
 }
