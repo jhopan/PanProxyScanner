@@ -242,6 +242,15 @@ Sumber ditambahkan/disunting di situ langsung dipakai pada siklus berikutnya; ka
 
 ## Sandi panel
 
+Aturan kekuatan sandi (berlaku di form ganti sandi maupun saat menyetel `admin_password` lewat
+API setelan): minimal **8 karakter** dan bukan `admin` (tanpa peduli besar-kecil huruf). Request
+yang melanggar dibalas 400 dan tidak mengubah setelan apa pun — termasuk field lain yang ikut dikirim
+dalam request yang sama.
+
+Catatan untuk operator: env `PS_ADMIN_PASSWORD` saat menjalankan layanan tetap menulis hash tanpa
+aturan ini (jalur darurat di host); pakai hanya kalau kamu memang ingin sandi lemah sementara.
+
+
 Login pertama memakai kredensial bawaan `admin` / `admin`. Panel **mewajibkan** penggantian sandi
 saat itu: sampai diganti, semua endpoint selain login/logout/ganti-sandi/health dibalas 403 dan
 panel hanya menampilkan form ganti sandi (sandi baru minimal 8 karakter, tidak boleh `admin`).

@@ -53,6 +53,11 @@ sandi baru tidak boleh `admin` (`400`) dan minimal **8 karakter** (`400`). Setel
 hash SHA-256 baru disimpan ke `settings.json` dan tanda wajib-ganti-sandi sesi itu dibersihkan;
 sandi tidak pernah masuk log.
 
+Aturan kekuatan yang sama (≥8 karakter, bukan `admin`, case-insensitive) juga berlaku untuk
+`admin_password` lewat `POST /api/settings`: nilai yang ditolak dibalas `400` dengan alasan
+(`sandi baru minimal 8 karakter` atau `sandi baru tidak boleh "admin" (sandi bawaan)`) dan
+seluruh patch dibatalkan — hash lama serta field lain tidak berubah.
+
 ```bash
 # login lalu pakai cookie untuk permintaan berikutnya
 curl -c cookie.txt -X POST http://127.0.0.1:8787/api/login \
@@ -754,7 +759,7 @@ disimpan ke `settings.json` dan diterapkan ke penjadwal.
 | `fresh_minutes` | jendela "hidup & segar" di statistik | ≥1 |
 | `purge_dead_hours` | housekeeping otomatis (0 = tidak) | ≥0 |
 | `admin_user` | username login website | string non-kosong |
-| `admin_password` | sandi login (ditulis sebagai hash; kosong = tidak diganti). Lewat `POST /api/password` sandi baru wajib ≥8 karakter dan bukan `admin` | string |
+| `admin_password` | sandi login (ditulis sebagai hash; kosong = tidak diganti). Wajib ≥8 karakter dan bukan `admin` (case-insensitive) — aturan yang sama dengan `POST /api/password`; nilai yang ditolak dibalas `400` tanpa mengubah settings | string |
 | `public_url` | URL publik hasil tunnel (informasi di halaman Tunnel CF) | string/URL |
 | `tunnel_name` | nama tunnel Cloudflare (dipakai di perintah & config.yml) | string |
 | `tunnel_domain` | domain yang diarahkan ke panel | hostname |

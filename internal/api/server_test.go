@@ -2073,3 +2073,158 @@ func TestLoginWithCustomHashDoesNotRequireChange(t *testing.T) {
 		t.Fatalf("token mesin harus tetap bisa memakai /api/*, dapat %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// POST /api/settings memakai aturan kekuatan sandi yang sama dengan POST /api/password:
+// `admin_password` di bawah 8 karakter atau sama dengan sandi bawaan ditolak 400, dan patch
+// yang ditolak tidak mengubah settings sama sekali.
+func TestSettingsAdminPasswordUsesSamePolicy(t *testing.T) {
+	const lama = "sandi-lama-ku"
+	cfg := settings.Default()
+	cfg.AdminPasswordHash = settings.HashPassword(lama)
+	srv, handler := newLoginTestServer(t, cfg)
+
+	cookie, login := loginPanel(t, handler, "admin", lama)
+	if login["must_change_password"] != false {
+		t.Fatalf("hash non-bawaan tidak boleh menandai wajib ganti sandi, dapat %v", login)
+	}
+	hashLama := settings.HashPassword(lama)
+	intervalLama := srv.currentSettings().IntervalMinutes
+
+	const pesanBawaan = `sandi baru tidak boleh "admin" (sandi bawaan)`
+	const pesanPendek = "sandi baru minimal 8 karakter"
+
+	rejected := []struct{ nama, body, pesan string }{
+		{"sandi bawaan", `{"admin_password":"admin"}`, pesanBawaan},
+		{"sandi bawaan huruf besar awal", `{"admin_password":"Admin"}`, pesanBawaan},
+		{"sandi bawaan huruf besar", `{"admin_password":"ADMIN"}`, pesanBawaan},
+		{"tujuh karakter", `{"admin_password":"1234567"}`, pesanPendek},
+	}
+	for _, c := range rejected {
+		rec := doPanel(t, handler, http.MethodPost, "/api/settings", cookie, c.body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: harus 400, dapat %d: %s", c.nama, rec.Code, rec.Body.String())
+		}
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		// Pesan yang dilihat klien persis sama dengan jalur POST /api/password (satu helper).
+		if out["error"] != c.pesan {
+			t.Fatalf("%s: pesan klien harus %q, dapat %q", c.nama, c.pesan, out["error"])
+		}
+		if got := srv.currentSettings().AdminPasswordHash; got != hashLama {
+			t.Fatalf("%s: hash lama harus tetap, dapat %q", c.nama, got)
+		}
+	}
+
+	// Patch campuran: penolakan membatalkan seluruh request, bukan hanya field sandinya.
+	campur := doPanel(t, handler, http.MethodPost, "/api/settings", cookie, `{"interval_minutes":99,"admin_user":"operator","admin_password":"1234567"}`)
+	if campur.Code != http.StatusBadRequest {
+		t.Fatalf("patch campuran dengan sandi lemah harus 400, dapat %d: %s", campur.Code, campur.Body.String())
+	}
+	if got := srv.currentSettings(); got.IntervalMinutes != intervalLama || got.AdminUser != "admin" {
+		t.Fatalf("penolakan tidak boleh menerapkan field lain, dapat interval=%d user=%q", got.IntervalMinutes, got.AdminUser)
+	}
+
+	// Patch setelan lain tanpa admin_password tetap sukses seperti sebelumnya.
+	okLain := doPanel(t, handler, http.MethodPost, "/api/settings", cookie, `{"interval_minutes":45,"purge_dead_hours":30}`)
+	if okLain.Code != http.StatusOK {
+		t.Fatalf("patch setelan lain tanpa sandi harus 200, dapat %d: %s", okLain.Code, okLain.Body.String())
+	}
+	var lain map[string]any
+	if err := json.Unmarshal(okLain.Body.Bytes(), &lain); err != nil {
+		t.Fatal(err)
+	}
+	saved, ok := lain["settings"].(map[string]any)
+	if !ok || saved["interval_minutes"] != float64(45) || saved["purge_dead_hours"] != float64(30) || saved["admin_password_set"] != true {
+		t.Fatalf("balasan setelan lain tidak sesuai, dapat %v", lain)
+	}
+	if got := srv.currentSettings().AdminPasswordHash; got != hashLama {
+		t.Fatalf("patch tanpa admin_password tidak boleh menyentuh hash, dapat %q", got)
+	}
+
+	// Setelah ada berkas tersimpan, penolakan juga tidak boleh menyentuh settings.json.
+	tolakSimpan := doPanel(t, handler, http.MethodPost, "/api/settings", cookie, `{"interval_minutes":7,"admin_password":"admin"}`)
+	if tolakSimpan.Code != http.StatusBadRequest {
+		t.Fatalf("penolakan setelah simpan harus 400, dapat %d: %s", tolakSimpan.Code, tolakSimpan.Body.String())
+	}
+	if got := srv.currentSettings(); got.IntervalMinutes != 45 || got.AdminPasswordHash != hashLama {
+		t.Fatalf("penolakan harus membatalkan seluruh patch, dapat interval=%d hash=%q", got.IntervalMinutes, got.AdminPasswordHash)
+	}
+	padaDisk, err := settings.Load(srv.cfgPath)
+	if err != nil {
+		t.Fatalf("settings.json harus tetap terbaca: %v", err)
+	}
+	if padaDisk.AdminPasswordHash != hashLama || padaDisk.IntervalMinutes != 45 {
+		t.Fatalf("settings.json tidak boleh berubah saat ditolak, dapat hash=%q interval=%d", padaDisk.AdminPasswordHash, padaDisk.IntervalMinutes)
+	}
+
+	const baru = "rahasia123"
+	okSandi := doPanel(t, handler, http.MethodPost, "/api/settings", cookie, `{"admin_password":"`+baru+`"}`)
+	if okSandi.Code != http.StatusOK {
+		t.Fatalf("sandi sah lewat /api/settings harus 200, dapat %d: %s", okSandi.Code, okSandi.Body.String())
+	}
+	if strings.Contains(okSandi.Body.String(), baru) {
+		t.Fatalf("balasan tidak boleh memuat sandi, dapat %s", okSandi.Body.String())
+	}
+	if got := srv.currentSettings().AdminPasswordHash; got != settings.HashPassword(baru) {
+		t.Fatalf("hash di memori harus ikut berubah, dapat %q", got)
+	}
+	savedCfg, err := settings.Load(srv.cfgPath)
+	if err != nil {
+		t.Fatalf("settings.json harus tersimpan: %v", err)
+	}
+	if savedCfg.AdminPasswordHash != settings.HashPassword(baru) {
+		t.Fatalf("hash tersimpan salah: %q", savedCfg.AdminPasswordHash)
+	}
+	raw, err := os.ReadFile(srv.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), baru) {
+		t.Fatal("sandi tidak boleh ditulis apa adanya ke settings.json")
+	}
+
+	// Sesi yang sudah ada tetap berlaku dan tidak mendadak ditandai wajib ganti sandi.
+	if rec := doPanel(t, handler, http.MethodGet, "/api/settings", cookie, ""); rec.Code != http.StatusOK {
+		t.Fatalf("sesi lama harus tetap berlaku, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	meRec := doPanel(t, handler, http.MethodGet, "/api/me", cookie, "")
+	var me map[string]any
+	if err := json.Unmarshal(meRec.Body.Bytes(), &me); err != nil {
+		t.Fatal(err)
+	}
+	if me["must_change_password"] != false {
+		t.Fatalf("/api/me tidak boleh menandai wajib ganti sandi, dapat %v", me)
+	}
+
+	if rec := doPanel(t, handler, http.MethodPost, "/api/login", nil, `{"username":"admin","password":"`+lama+`"}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("sandi lama harus ditolak setelah diganti lewat setelan, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	_, loginBaru := loginPanel(t, handler, "admin", baru)
+	if loginBaru["must_change_password"] != false {
+		t.Fatalf("login dengan sandi baru tidak boleh ditandai, dapat %v", loginBaru)
+	}
+
+	// Jalur POST /api/password memakai aturan & pesan yang sama (satu helper bersama).
+	for _, c := range []struct{ nama, sandi, pesan string }{
+		{"sandi bawaan", "admin", pesanBawaan},
+		{"sandi bawaan huruf besar", "ADMIN", pesanBawaan},
+		{"tujuh karakter", "1234567", pesanPendek},
+	} {
+		rec := doPanel(t, handler, http.MethodPost, "/api/password", cookie, `{"old_password":"`+baru+`","new_password":"`+c.sandi+`"}`)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("POST /api/password %s harus 400, dapat %d: %s", c.nama, rec.Code, rec.Body.String())
+		}
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if out["error"] != c.pesan {
+			t.Fatalf("POST /api/password %s harus memakai pesan %q, dapat %q", c.nama, c.pesan, out["error"])
+		}
+	}
+	if got := srv.currentSettings().AdminPasswordHash; got != settings.HashPassword(baru) {
+		t.Fatalf("penolakan di /api/password tidak boleh mengubah hash, dapat %q", got)
+	}
+}

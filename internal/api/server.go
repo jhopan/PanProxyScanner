@@ -262,9 +262,9 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePassword mengganti sandi admin dari panel: sandi lama diverifikasi terhadap hash
-// tersimpan, sandi baru minimal 8 karakter dan tidak boleh sandi bawaan. Setelah berhasil,
-// hash baru disimpan ke settings.json dan tanda wajib-ganti-sandi sesi ini dibersihkan.
-// Sandi tidak pernah dicatat ke log.
+// tersimpan, sandi baru diperiksa settings.ValidateNewPassword (minimal 8 karakter, bukan sandi
+// bawaan). Setelah berhasil, hash baru disimpan ke settings.json dan tanda wajib-ganti-sandi sesi
+// ini dibersihkan. Sandi tidak pernah dicatat ke log.
 func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "pakai POST"})
@@ -288,18 +288,14 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 	// /api/settings bisa mengganti sandi bersamaan).
 	s.mu.Lock()
 	cfg := *s.settings
-	switch {
-	case !auth.PasswordMatches(cfg.AdminPasswordHash, body.OldPassword, settings.HashPassword):
+	if !auth.PasswordMatches(cfg.AdminPasswordHash, body.OldPassword, settings.HashPassword) {
 		s.mu.Unlock()
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "sandi lama salah"})
 		return
-	case body.NewPassword == "admin":
+	}
+	if err := settings.ValidateNewPassword(body.NewPassword); err != nil {
 		s.mu.Unlock()
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": `sandi baru tidak boleh "admin" (sandi bawaan)`})
-		return
-	case len(body.NewPassword) < 8:
-		s.mu.Unlock()
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sandi baru minimal 8 karakter"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	cfg.AdminPasswordHash = settings.HashPassword(body.NewPassword)
@@ -2139,6 +2135,16 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Aturan kekuatan sandi sama dengan POST /api/password (settings.ValidateNewPassword).
+	// Diperiksa sebelum kunci diambil dan sebelum satu pun field diterapkan, supaya patch yang
+	// ditolak tidak menyisakan perubahan apa pun di settings.
+	if patch.AdminPassword != nil && *patch.AdminPassword != "" {
+		if err := settings.ValidateNewPassword(*patch.AdminPassword); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+
 	s.mu.Lock()
 	cfg := *s.settings
 	if patch.Auto != nil {
@@ -2178,6 +2184,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		cfg.AdminUser = strings.TrimSpace(*patch.AdminUser)
 	}
 	if patch.AdminPassword != nil && *patch.AdminPassword != "" {
+		// Kekuatannya sudah diperiksa di atas lewat settings.ValidateNewPassword.
 		cfg.AdminPasswordHash = settings.HashPassword(*patch.AdminPassword)
 	}
 	if patch.PublicURL != nil {

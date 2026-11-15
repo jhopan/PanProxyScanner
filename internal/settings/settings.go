@@ -83,6 +83,20 @@ func HashPassword(password string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// ValidateNewPassword memeriksa kekuatan sandi baru yang dipilih pengguna. Aturan ini adalah
+// satu-satunya definisi kekuatan sandi: dipakai bersama oleh POST /api/password dan patch
+// `admin_password` lewat POST /api/settings, supaya tidak ada jalur yang bisa menyetel sandi
+// lebih lemah. Pesan error dikembalikan apa adanya ke klien.
+func ValidateNewPassword(password string) error {
+	if strings.EqualFold(password, "admin") {
+		return errors.New(`sandi baru tidak boleh "admin" (sandi bawaan)`)
+	}
+	if len(password) < 8 {
+		return errors.New("sandi baru minimal 8 karakter")
+	}
+	return nil
+}
+
 // maxPushCap adalah batas atas nilai `push_org_cap`/`push_country_cap` yang diterima dari
 // pengguna: cukup untuk pool besar, tapi menahan salah ketik (mis. 1000000).
 const maxPushCap = 10000
