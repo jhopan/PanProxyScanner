@@ -240,7 +240,7 @@ func (c *Client) Pull(ctx context.Context, limit, offset int, staleBefore int64,
 		return nil, fmt.Errorf("url atau key Supabase belum diisi")
 	}
 	query := url.Values{}
-	query.Set("select", "id,ip,port,country,is_active,last_checked,ping")
+	query.Set("select", "id,ip,port,country,org,is_active,last_checked,ping")
 	if onlyAlive {
 		query.Set("is_active", "eq.true")
 	}

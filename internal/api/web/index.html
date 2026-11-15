@@ -235,6 +235,8 @@
             <label>Push hanya proxy sanggup TLS<select id="sbPushTls"><option value="true">ya</option><option value="false">tidak</option></select></label>
             <label>Matikan sumber yang kosong berulang<select id="sbAutoDisable"><option value="true">ya</option><option value="false">tidak</option></select></label>
             <label>Batas kosong berturut-turut<input type="number" id="sbStreak" min="0" max="100" style="width:110px"></label>
+            <label>Batas baris per org<input type="number" id="sbOrgCap" min="0" max="10000" step="5" style="width:120px" title="0 = tanpa batas; baris tanpa org tidak dihitung"></label>
+            <label>Batas baris per negara<input type="number" id="sbCountryCap" min="0" max="10000" step="5" style="width:120px" title="0 = tanpa batas; baris tanpa negara tidak dihitung"></label>
           </div>
           <div class="muted" id="sbStatus" style="margin-top:12px">—</div>
         </div>
@@ -612,6 +614,8 @@ async function loadSupabase() {
   $("sbPushTls").value = String(data.push_require_tls !== false);
   $("sbAutoDisable").value = String(data.auto_disable_sources !== false);
   $("sbStreak").value = data.zero_streak_limit ?? 3;
+  $("sbOrgCap").value = data.push_org_cap ?? 25;
+  $("sbCountryCap").value = data.push_country_cap ?? 60;
   const last = data.last_sync ? `${data.last_sync.at} — ${data.last_sync.note}${data.last_sync.error ? " (error: " + data.last_sync.error + ")" : ""}` : "belum ada sinkronisasi";
   $("sbStatus").innerHTML = [
     `status: ${data.configured ? "<b>terkonfigurasi</b>" : "belum diisi"}`,
@@ -634,6 +638,8 @@ async function sbSave() {
     push_require_tls: $("sbPushTls").value === "true",
     auto_disable_sources: $("sbAutoDisable").value === "true",
     zero_streak_limit: num("sbStreak") || 0,
+    push_org_cap: num("sbOrgCap") || 0,
+    push_country_cap: num("sbCountryCap") || 0,
   };
   if ($("sbKey").value.trim()) patch.supabase_key = $("sbKey").value.trim();
   if ($("sbServiceKey").value.trim()) patch.supabase_service_key = $("sbServiceKey").value.trim();

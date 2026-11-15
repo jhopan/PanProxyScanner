@@ -357,3 +357,54 @@ func TestFilterSince(t *testing.T) {
 		t.Fatalf("Since di masa depan tidak boleh mengembalikan baris: %d", len(future))
 	}
 }
+
+// SetOrgs menyimpan org (penyedia) yang dibaca dari tabel Supabase untuk baris yang sudah
+// dikenal, dan tidak menimpa nilai lama dengan kosong atau membuat baris baru.
+func TestSetOrgs(t *testing.T) {
+	st := openTest(t)
+	if err := st.RecordAlive("1.1.1.1", 1080, "socks5", "ID", 900, 2, true, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordAlive("2.2.2.2", 8080, "http", "SG", 500, 2, true, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetOrgs([]OrgRef{
+		{IP: "1.1.1.1", Port: 1080, Org: "Hetzner"},
+		{IP: "2.2.2.2", Port: 8080, Org: "   "},
+		{IP: "9.9.9.9", Port: 1080, Org: "OVH"}, // belum dikenal: tidak boleh membuat baris baru
+	}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := st.List(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("SetOrgs tidak boleh menambah baris, dapat %d", len(list))
+	}
+	byIP := map[string]Proxy{}
+	for _, p := range list {
+		byIP[p.IP] = p
+	}
+	if byIP["1.1.1.1"].Org != "Hetzner" {
+		t.Fatalf("org 1.1.1.1 harus tersimpan, dapat %q", byIP["1.1.1.1"].Org)
+	}
+	if byIP["2.2.2.2"].Org != "" {
+		t.Fatalf("org kosong tidak boleh menulis apa pun, dapat %q", byIP["2.2.2.2"].Org)
+	}
+
+	// org kosong pada pembacaan berikutnya (kolomnya belum diisi panel) harus mempertahankan
+	// nilai lama, bukan menghapusnya.
+	if err := st.SetOrgs([]OrgRef{{IP: "1.1.1.1", Port: 1080, Org: ""}}); err != nil {
+		t.Fatal(err)
+	}
+	list, err = st.List(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range list {
+		if p.IP == "1.1.1.1" && p.Org != "Hetzner" {
+			t.Fatalf("org lama harus dipertahankan, dapat %q", p.Org)
+		}
+	}
+}

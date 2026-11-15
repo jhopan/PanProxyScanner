@@ -281,6 +281,8 @@ Menu **Supabase** di panel:
 | **Uji TLS 443** | verifikasi tambahan `CONNECT 443` + TLS terverifikasi → kolom `tls_ok`, filter `?tls=true` |
 | **Uji port 8443/2053** | bukti proxy mau meneruskan port non-standar → kolom `alt_ok`, filter `?alt=true` |
 | **Push hanya proxy sanggup TLS** | `push_require_tls`: panel menerima hanya proxy yang lolos uji TLS 443 |
+| **Batas per penyedia** | `push_org_cap` (bawaan 25): maksimal sekian baris per `org` tiap push; `0` = tanpa batas |
+| **Batas per negara** | `push_country_cap` (bawaan 60): maksimal sekian baris per negara tiap push; `0` = tanpa batas |
 | **Matikan sumber kosong** | sumber yang berkali-kali tidak menghasilkan proxy dimatikan otomatis (bisa dinyalakan lagi dari menu Sumber) |
 
 `push` mengurutkan proxy dengan skor (`ok_count*100 - fail_count*25 - ping/10`), lalu menyaring:
@@ -290,11 +292,13 @@ Menu **Supabase** di panel:
 | rasio | lewati proxy yang `fail_count > ok_count` |
 | verdict segar | hanya memakai hasil cek ≤ **90 menit** (`pushMaxAge`), bukan `fresh_minutes` 6 jam |
 | kematangan | perlu **2× berhasil** (`ok_count ≥ 2`) sebelum naik ke pool; sekali hidup lalu mati tidak cukup |
+| batas org | maksimal `push_org_cap` baris per penyedia (`org`) dalam satu push (bawaan 25; `0` = tanpa batas) |
+| batas negara | maksimal `push_country_cap` baris per negara dalam satu push (bawaan 60; `0` = tanpa batas) |
 | exit IP | satu alamat keluar per **/24** — lima port dari mesin yang sama tidak memenuhi pool |
 | TLS | **hanya menaikkan yang terbukti sanggup TLS 443**; sisanya justru diturunkan |
 
 Status sinkronisasi menuliskan semuanya, mis.:
-`push 180 baris (naik 49, turun 131, wajib TLS: false, verdict segar ≤ 90 menit, 30 ditahan (baru 1× berhasil), 2 dilewati (exit IP sama), kolom tls_ok/alt_ok/exit_ip ikut dikirim)`.
+`push 180 baris (naik 49, turun 131, wajib TLS: false, verdict segar ≤ 90 menit, 30 ditahan (baru 1× berhasil), 12 ditahan (batas org/negara), 2 dilewati (exit IP sama), kolom tls_ok/alt_ok/exit_ip ikut dikirim)`.
 
 Angka pengukuran: dari 154 proxy yang lolos uji HTTP, **51 sanggup tunnel TLS 443 (33%)** dan 37
 sanggup port non-standar. Sisa dua pertiga kalau dibiarkan aktif akan menjadi konfigurasi
@@ -333,7 +337,7 @@ curl -X POST "http://127.0.0.1:8787/api/supabase/push?limit=200"      -H "X-Api-
 curl -X POST "http://127.0.0.1:8787/api/supabase/pull-verify?limit=100&jobs=100" -H "X-Api-Token: <token>"
 ```
 
-Dengan `supabase_auto_push=true` dan `supabase_pull_limit=50`, panel CFVPN Hub selalu
+Dengan `supabase_auto_push=true` dan `supabase_pull_limit=50`, panel Pan-VlessCloudflare selalu
 menemukan daftar segar (`is_active=true` + `last_checked` baru) tanpa satu pun request
 verifikasi dari browser.
 

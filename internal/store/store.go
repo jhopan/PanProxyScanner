@@ -18,6 +18,7 @@ type Proxy struct {
 	Port        int    `json:"port"`
 	Protocol    string `json:"protocol"`
 	Country     string `json:"country"`
+	Org         string `json:"org"` // penyedia/ASN dari tabel Supabase (lihat SetOrgs); kosong = belum diketahui
 	TLS         bool   `json:"tls_ok"`
 	AltOK       bool   `json:"alt_ok"`
 	ExitIP      string `json:"exit_ip"`
@@ -108,6 +109,7 @@ CREATE TABLE IF NOT EXISTS proxies (
   port         INTEGER NOT NULL,
   protocol     TEXT,
   country      TEXT,
+  org          TEXT,
   tls_ok       INTEGER NOT NULL DEFAULT 0,
   alt_ok       INTEGER NOT NULL DEFAULT 0,
   exit_ip      TEXT,
@@ -160,6 +162,8 @@ CREATE INDEX IF NOT EXISTS idx_proxies_ping ON proxies(alive, ping_ms);
 	for _, col := range []struct{ name, ddl string }{
 		{"alt_ok", `ALTER TABLE proxies ADD COLUMN alt_ok INTEGER NOT NULL DEFAULT 0`},
 		{"exit_ip", `ALTER TABLE proxies ADD COLUMN exit_ip TEXT`},
+		// org: penyedia/ASN baris ini, dibaca dari tabel Supabase (lihat SetOrgs).
+		{"org", `ALTER TABLE proxies ADD COLUMN org TEXT`},
 	} {
 		if !columnExists(s.db, "proxies", col.name) {
 			if _, err := s.db.Exec(col.ddl); err != nil {
@@ -464,6 +468,45 @@ ON CONFLICT(ip, port) DO UPDATE SET
 	return err
 }
 
+// OrgRef adalah satu baris pengetahuan tentang penyedia/ASN: alamat proxy dan nilai `org`
+// yang dipakai tabel Supabase untuknya.
+type OrgRef struct {
+	IP   string
+	Port int
+	Org  string
+}
+
+// SetOrgs menyimpan `org` (penyedia/ASN) untuk baris yang sudah dikenal database lokal.
+// Sumber satu-satunya adalah tabel Supabase — kolom itu diisi di luar scanner, dan scanner
+// hanya membacanya supaya bisa membatasi berapa baris per penyedia yang dipush (lihat
+// `push_org_cap`). Baris yang belum ada di database lokal tidak ikut dibuat, dan `org` kosong
+// tidak menimpa nilai lama. Verdict verifikasi tidak disentuh: ini metadata, bukan hasil cek.
+func (s *Store) SetOrgs(refs []OrgRef) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`UPDATE proxies SET org = ? WHERE ip = ? AND port = ?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, ref := range refs {
+		org := strings.TrimSpace(ref.Org)
+		if org == "" {
+			continue
+		}
+		if _, err := stmt.Exec(org, ref.IP, ref.Port); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // Known mengembalikan peta "ip:port" yang sudah pernah tersimpan.
 func (s *Store) Known() (map[string]bool, error) {
 	rows, err := s.db.Query(`SELECT ip, port FROM proxies`)
@@ -494,7 +537,7 @@ func (s *Store) Stale(olderThan, deadOlderThan time.Duration, limit int) ([]Prox
 	cutoff := time.Now().Add(-olderThan).Unix()
 	deadCutoff := time.Now().Add(-deadOlderThan).Unix()
 	rows, err := s.db.Query(`
-SELECT ip, port, COALESCE(protocol,''), COALESCE(country,''), tls_ok, alt_ok, COALESCE(exit_ip,''), alive, COALESCE(ping_ms,0), last_checked, first_seen, ok_count, fail_count, sources
+SELECT ip, port, COALESCE(protocol,''), COALESCE(country,''), COALESCE(org,''), tls_ok, alt_ok, COALESCE(exit_ip,''), alive, COALESCE(ping_ms,0), last_checked, first_seen, ok_count, fail_count, sources
 FROM proxies
 WHERE (alive = 1 AND last_checked < ?) OR (alive = 0 AND last_checked < ?)
 ORDER BY alive DESC, last_checked ASC
@@ -572,7 +615,7 @@ func (s *Store) List(f Filter) ([]Proxy, error) {
 		// skor = keberhasilan tinggi, kegagalan rendah, ping kecil
 		order = "(ok_count * 100 - fail_count * 25 - COALESCE(ping_ms, 99999) / 10) DESC, ping_ms IS NULL, ping_ms ASC"
 	}
-	query := `SELECT ip, port, COALESCE(protocol,''), COALESCE(country,''), tls_ok, alt_ok, COALESCE(exit_ip,''), alive, COALESCE(ping_ms,0), last_checked, first_seen, ok_count, fail_count, sources FROM proxies`
+	query := `SELECT ip, port, COALESCE(protocol,''), COALESCE(country,''), COALESCE(org,''), tls_ok, alt_ok, COALESCE(exit_ip,''), alive, COALESCE(ping_ms,0), last_checked, first_seen, ok_count, fail_count, sources FROM proxies`
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -675,7 +718,7 @@ func scanProxies(rows *sql.Rows) ([]Proxy, error) {
 	for rows.Next() {
 		var p Proxy
 		var alive, tlsOK, altOK int
-		if err := rows.Scan(&p.IP, &p.Port, &p.Protocol, &p.Country, &tlsOK, &altOK, &p.ExitIP, &alive, &p.PingMS, &p.LastChecked, &p.FirstSeen, &p.OKCount, &p.FailCount, &p.Sources); err != nil {
+		if err := rows.Scan(&p.IP, &p.Port, &p.Protocol, &p.Country, &p.Org, &tlsOK, &altOK, &p.ExitIP, &alive, &p.PingMS, &p.LastChecked, &p.FirstSeen, &p.OKCount, &p.FailCount, &p.Sources); err != nil {
 			return nil, err
 		}
 		p.Alive = alive == 1

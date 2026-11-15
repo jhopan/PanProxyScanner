@@ -84,8 +84,8 @@ Isi dulu **URL**, **key**, dan **tabel** di menu **Supabase** (atau lewat `POST 
 |---|---|
 | `GET /api/supabase/status` | konfigurasi, jumlah baris Supabase terakhir yang diketahui, catatan sinkron terakhir. Tambah `?test=1` untuk benar-benar mengecek ke Supabase (lebih lambat) |
 | `POST /api/supabase/test` | uji koneksi: `{ "ok": true, "table": "proxy_pool", "total": 2732, "alive": 413 }` |
-| `POST /api/supabase/push?limit=500` | kirim proxy **hidup & segar** dari database lokal ke Supabase (upsert by `ip,port`); kolom yang ditulis: `ip`, `port`, `country`, `is_active`, `ping`, `last_checked`, bukti `tls_ok`/`alt_ok`/`exit_ip`, dan bukti vantage host `tunnel_host_ok`/`tunnel_host_ms`/`tunnel_host_checked`. Kolom bukti yang belum ada di tabel dilepas otomatis (hanya untuk error kolom: HTTP 400 `PGRST204`/`42703`), jadi push tidak gagal di project yang SQL-nya belum dijalankan |
-| `POST /api/supabase/pull-verify?limit=50&jobs=100` | tarik baris dari Supabase (yang paling lama tidak dicek), verifikasi satu per satu di sini, lalu tulis balik `is_active`/`ping`/`last_checked` — baris yang mati langsung ditandai |
+| `POST /api/supabase/push?limit=500` | kirim proxy **hidup & segar** dari database lokal ke Supabase (upsert by `ip,port`); kolom yang ditulis: `ip`, `port`, `country`, `org`, `is_active`, `ping`, `last_checked`, bukti `tls_ok`/`alt_ok`/`exit_ip`, dan bukti vantage host `tunnel_host_ok`/`tunnel_host_ms`/`tunnel_host_checked`. `org` hanya diisi kalau barisnya pernah terbaca dari tabel Supabase (scanner tidak menebak penyedia). Kolom bukti yang belum ada di tabel dilepas otomatis (hanya untuk error kolom: HTTP 400 `PGRST204`/`42703`), jadi push tidak gagal di project yang SQL-nya belum dijalankan |
+| `POST /api/supabase/pull-verify?limit=50&jobs=100` | tarik baris dari Supabase (yang paling lama tidak dicek), verifikasi satu per satu di sini, lalu tulis balik `is_active`/`ping`/`last_checked` — baris yang mati langsung ditandai. Kolom `org` yang dibaca dari tabel disimpan di database lokal (hanya untuk baris yang sudah dikenal) sebagai bahan `push_org_cap` |
 | `POST /api/supabase/prune?days=7&limit=2000` | hapus baris **mati** yang terakhir dicek lebih dari N hari. Balasan `{ "deleted": N, "kandidat_sebelumnya": M }` |
 | `POST /api/pool-purge` | hapus **semua** baris mati (`is_active = false`) atas permintaan panel CFVPN Hub (whoami + role `admin`, DELETE memakai `supabase_service_key`). Detail di bawah |
 
@@ -137,7 +137,15 @@ Dua hal yang ikut menentukan kualitas push:
   - verdict harus segar ≤ **90 menit** (`pushMaxAge`), walaupun `fresh_minutes` 360;
   - perlu **`ok_count ≥ 2`** sebelum naik (proxy yang baru sekali berhasil ditahan, dicatat sebagai
     `N ditahan (baru 1× berhasil)` di status sinkron);
-  - dedup alamat keluar per **/24** (`N dilewati (exit IP sama)`).
+  - dedup alamat keluar per **/24** (`N dilewati (exit IP sama)`);
+  - batas baris per **penyedia (`org`)** dan per **negara**: `push_org_cap` (bawaan 25) dan
+    `push_country_cap` (bawaan 60). Karena seleksi sudah urut skor, yang dipertahankan adalah
+    baris paling tinggi skornya (ping terkecil) dan sisanya ditahan sampai push berikutnya —
+    dicatat sebagai `N ditahan (batas org/negara)`. Setel `0` untuk mematikan batasnya, dan
+    `-1`/negatif ditolak (kembali ke bawaan, bukan dianggap "tanpa batas").
+    Baris tanpa `org` (penyedianya belum diketahui — scanner hanya membaca `org` dari tabel
+    Supabase, tidak menebaknya) tidak dihitung sebagai satu org yang sama, jadi tidak ditahan
+    hanya karena cap; hal yang sama berlaku untuk baris tanpa negara.
 - **Uji TLS 443 & port lain**: setiap proxy hidup diuji `GET https://cp.cloudflare.com/cdn-cgi/trace`
   di dalam tunnel TLS dengan **verifikasi sertifikat**, lalu (kalau `probe_alt` aktif) trace
   yang sama lewat port 8443/2053. Bukti yang diterima bukan cuma status HTTP: harus ada header
@@ -178,6 +186,8 @@ Supaya berjalan sendiri tanpa perintah manual, aktifkan di **Scheduler → Supab
 | `supabase_table` | nama tabel, default `proxy_pool` |
 | `supabase_auto_push` | `true` = setiap siklus selesai, proxy hidup otomatis dikirim ke Supabase |
 | `supabase_pull_limit` | jumlah baris Supabase yang ditarik & diverifikasi tiap siklus (`0` = tidak) |
+| `push_org_cap` | maksimum baris **per `org`/penyedia** dalam satu push (bawaan `25`; `0` = tanpa batas; nilai negatif ditolak → kembali ke bawaan). Baris tanpa `org` tidak dihitung |
+| `push_country_cap` | maksimum baris **per negara** dalam satu push (bawaan `60`; `0` = tanpa batas; nilai negatif ditolak → kembali ke bawaan). Baris tanpa negara tidak dihitung |
 | `push delta` | tidak ada setelan terpisah: waktu push terakhir disimpan di tabel `meta` (`last_push_at`), dan push dari jadwal 6 jam / auto-push hanya mengirim baris yang `last_checked`-nya lebih baru. Kalau tidak ada yang berubah, status sinkron menulis `push delta: tidak ada perubahan` (bukan kegagalan) |
 | `probe_tls` | uji tunnel 443 dengan TLS terverifikasi (root CA sistem) untuk setiap proxy hidup |
 | `probe_alt` | uji tambahan port non-standar 8443/2053 (`alt_ok`) |
@@ -600,6 +610,8 @@ disimpan ke `settings.json` dan diterapkan ke penjadwal.
 | `supabase_table` | tabel tujuan, default `proxy_pool` | string |
 | `supabase_auto_push` | dorong hasil siklus ke Supabase otomatis | bool |
 | `supabase_pull_limit` | baris Supabase yang diverifikasi ulang tiap siklus | 0–20000 |
+| `push_org_cap` | maksimum baris per `org`/penyedia dalam satu push (0 = tanpa batas) | 0–10000 (negatif → bawaan) |
+| `push_country_cap` | maksimum baris per negara dalam satu push (0 = tanpa batas) | 0–10000 (negatif → bawaan) |
 | `token` | token API untuk klien mesin (kosong = `/api/*` hanya lewat sesi) | string |
 
 ```bash

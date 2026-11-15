@@ -50,6 +50,8 @@ type Settings struct {
 	SupabaseTable       string         `json:"supabase_table"`         // tabel tujuan (default proxy_pool)
 	SupabaseAutoPush    bool           `json:"supabase_auto_push"`     // dorong hasil siklus ke Supabase otomatis
 	SupabasePullLimit   int            `json:"supabase_pull_limit"`    // baris Supabase yang diverifikasi ulang per siklus (0 = tidak)
+	PushOrgCap          int            `json:"push_org_cap"`           // maksimum baris per org/penyedia dalam satu push (0 = tanpa batas)
+	PushCountryCap      int            `json:"push_country_cap"`       // maksimum baris per negara dalam satu push (0 = tanpa batas)
 	CountryTargets      map[string]int `json:"country_targets"`        // target minimal proxy sanggup TLS per negara (kode 2 huruf)
 	ScheduleTimezone    string         `json:"schedule_timezone"`      // zona waktu untuk daily_at, mis. Asia/Makassar (WITA)
 	TestIntervalHours   int            `json:"test_interval_hours"`    // uji ulang berkala (jam); 0 = mati
@@ -78,6 +80,10 @@ func HashPassword(password string) string {
 	sum := sha256.Sum256([]byte(password))
 	return hex.EncodeToString(sum[:])
 }
+
+// maxPushCap adalah batas atas nilai `push_org_cap`/`push_country_cap` yang diterima dari
+// pengguna: cukup untuk pool besar, tapi menahan salah ketik (mis. 1000000).
+const maxPushCap = 10000
 
 // Default mengembalikan pengaturan awal yang wajar.
 func Default() Settings {
@@ -114,6 +120,8 @@ func Default() Settings {
 		SupabaseTable:       "proxy_pool",
 		SupabaseAutoPush:    false,
 		SupabasePullLimit:   0,
+		PushOrgCap:          25,
+		PushCountryCap:      60,
 		CountryTargets:      DefaultCountryTargets(),
 		ScheduleTimezone:    "Asia/Makassar", // WITA: 08:00 di sini = 00:00 UTC
 		TestIntervalHours:   6,
@@ -188,6 +196,20 @@ func (s *Settings) Normalize() {
 	}
 	if s.SupabasePullLimit > 20000 {
 		s.SupabasePullLimit = 20000
+	}
+	// Batas per org/negara: 0 = tanpa batas, jadi nilai negatif (salah ketik) dikembalikan ke
+	// bawaan supaya tidak berubah arti menjadi "tanpa batas" tanpa disadari.
+	if s.PushOrgCap < 0 {
+		s.PushOrgCap = d.PushOrgCap
+	}
+	if s.PushOrgCap > maxPushCap {
+		s.PushOrgCap = maxPushCap
+	}
+	if s.PushCountryCap < 0 {
+		s.PushCountryCap = d.PushCountryCap
+	}
+	if s.PushCountryCap > maxPushCap {
+		s.PushCountryCap = maxPushCap
 	}
 	if s.ScheduleMode != "daily" {
 		s.ScheduleMode = "interval"

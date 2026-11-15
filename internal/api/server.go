@@ -256,6 +256,8 @@ func (s *Server) handleSupabaseStatus(w http.ResponseWriter, r *http.Request) {
 		"has_service_key":      cfg.SupabaseServiceKey != "",
 		"auto_push":            cfg.SupabaseAutoPush,
 		"pull_limit":           cfg.SupabasePullLimit,
+		"push_org_cap":         cfg.PushOrgCap,
+		"push_country_cap":     cfg.PushCountryCap,
 		"prune_days":           cfg.SupabasePruneDays,
 		"probe_tls":            cfg.ProbeTLS,
 		"auto_disable_sources": cfg.AutoDisableSources,
@@ -768,7 +770,18 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 	// berisi satu orang per IP, bukan lima port dari mesin yang sama.
 	const minOK = 2
 	seenExit := make(map[string]bool, len(promote))
-	skippedYoung, skippedDup, skippedEdge := 0, 0, 0
+	// orgCount/countryCount menjaga komposisi pool: tanpa batas ini, satu penyedia (org) atau
+	// satu negara bisa menghabiskan seluruh kuota push. Urutan `promote` sudah skor tertinggi
+	// lebih dulu, jadi baris yang dipertahankan selalu yang terbaik skornya; sisanya ditahan
+	// sampai push berikutnya (barisnya tetap ada di database lokal).
+	//
+	// `org` kosong tidak dihitung: baris yang penyedianya belum diketahui (mis. hasil scrape
+	// yang belum pernah terlihat di tabel Supabase) bukan "satu org yang sama", jadi ia tidak
+	// boleh ditahan hanya karena cap. Hal yang sama berlaku untuk negara kosong.
+	orgCount := make(map[string]int, len(promote))
+	countryCount := make(map[string]int, len(promote))
+	skippedYoung, skippedDup, skippedEdge, skippedCap := 0, 0, 0, 0
+	promoted := 0
 	for _, p := range promote {
 		// lewati proxy yang lebih sering gagal daripada berhasil
 		if p.FailCount > p.OKCount {
@@ -783,15 +796,30 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 			skippedEdge++
 			continue
 		}
-		if key := exitKey(p.ExitIP); key != "" {
-			if seenExit[key] {
-				skippedDup++
-				continue
-			}
-			seenExit[key] = true
+		exit := exitKey(p.ExitIP)
+		if exit != "" && seenExit[exit] {
+			skippedDup++
+			continue
 		}
+		org := strings.TrimSpace(p.Org)
+		country := strings.ToUpper(strings.TrimSpace(p.Country))
+		if (org != "" && cfg.PushOrgCap > 0 && orgCount[org] >= cfg.PushOrgCap) ||
+			(country != "" && cfg.PushCountryCap > 0 && countryCount[country] >= cfg.PushCountryCap) {
+			skippedCap++
+			continue
+		}
+		if exit != "" {
+			seenExit[exit] = true
+		}
+		if org != "" {
+			orgCount[org]++
+		}
+		if country != "" {
+			countryCount[country]++
+		}
+		promoted++
 		rows = append(rows, supabase.Row{
-			IP: p.IP, Port: strconv.Itoa(p.Port), Country: p.Country,
+			IP: p.IP, Port: strconv.Itoa(p.Port), Country: p.Country, Org: org,
 			IsActive: true, LastChecked: now, Ping: p.PingMS,
 		}.EvidenceRow(p.TLS, p.AltOK, p.ExitIP).
 			HostEvidence(p.Alive, p.PingMS, hostCheckedAt(p.LastChecked)))
@@ -803,7 +831,7 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 				continue
 			}
 			rows = append(rows, supabase.Row{
-				IP: p.IP, Port: strconv.Itoa(p.Port), Country: p.Country,
+				IP: p.IP, Port: strconv.Itoa(p.Port), Country: p.Country, Org: strings.TrimSpace(p.Org),
 				IsActive: false, LastChecked: now, Ping: p.PingMS,
 			}.EvidenceRow(false, p.AltOK, p.ExitIP).
 				HostEvidence(p.Alive, p.PingMS, hostCheckedAt(p.LastChecked)))
@@ -828,13 +856,20 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 			s.setLastRemote(total, aliveCount)
 		}
 	}
+	// "naik" dihitung dari baris yang benar-benar dikirim sebagai is_active=true (`promoted`),
+	// bukan dari selisih daftar kandidat: sekarang ada beberapa saringan (baru 1× berhasil,
+	// edge bilang mati, exit IP sama, batas org/negara) dan angka itu harus cocok dengan isi
+	// payload.
 	note := fmt.Sprintf("push %d baris (naik %d, turun %d, wajib TLS: %v, verdict segar ≤ %d menit",
-		sent, len(promote)-skippedYoung-skippedDup, demoted, cfg.PushRequireTLS, fresh)
+		sent, promoted, demoted, cfg.PushRequireTLS, fresh)
 	if skippedYoung > 0 {
 		note += fmt.Sprintf(", %d ditahan (baru 1× berhasil)", skippedYoung)
 	}
 	if skippedDup > 0 {
 		note += fmt.Sprintf(", %d dilewati (exit IP sama)", skippedDup)
+	}
+	if skippedCap > 0 {
+		note += fmt.Sprintf(", %d ditahan (batas org/negara)", skippedCap)
 	}
 	if skippedEdge > 0 {
 		note += fmt.Sprintf(", %d ditahan (edge bilang mati)", skippedEdge)
@@ -929,6 +964,27 @@ func (s supabaseSink) UpdateVerdicts(ctx context.Context, verdicts []scraper.Ver
 	return nil
 }
 
+// remoteOrgs mengubah baris Supabase menjadi daftar org untuk store.SetOrgs: hanya baris
+// ber-port numerik dan ber-org tidak kosong, karena store tidak boleh menimpa nilai lama
+// dengan kosong.
+func remoteOrgs(rows []supabase.Row) []store.OrgRef {
+	if len(rows) == 0 {
+		return nil
+	}
+	refs := make([]store.OrgRef, 0, len(rows))
+	for _, row := range rows {
+		if strings.TrimSpace(row.Org) == "" {
+			continue
+		}
+		port, err := strconv.Atoi(strings.TrimSpace(row.Port))
+		if err != nil {
+			continue
+		}
+		refs = append(refs, store.OrgRef{IP: strings.TrimSpace(row.IP), Port: port, Org: row.Org})
+	}
+	return refs
+}
+
 // pullVerify menarik baris dari Supabase dan memverifikasinya di sini.
 func (s *Server) pullVerify(ctx context.Context, client *supabase.Client, opts scraper.Options, limit int) (scraper.Summary, error) {
 	cfg := s.currentSettings()
@@ -954,6 +1010,16 @@ func (s *Server) pullVerify(ctx context.Context, client *supabase.Client, opts s
 		remote = append(remote, scraper.RemoteRow{ID: row.ID, IP: row.IP, Port: row.Port, Country: row.Country})
 	}
 	summary, err := scraper.VerifyRemote(ctx, s.store, supabaseSink{client: client, requireTLS: s.currentSettings().PushRequireTLS}, remote, opts, s.runner)
+	// org (penyedia/ASN) yang dibaca dari tabel Supabase disimpan di database lokal supaya
+	// push bisa membatasi berapa baris per penyedia (`push_org_cap`); scanner tidak menebak
+	// nilai ini sendiri. Dijalankan SETELAH verifikasi supaya baris yang baru masuk batch ini
+	// ikut kebagian. Kegagalan di sini tidak menggagalkan verifikasi — hanya berarti cap org
+	// belum bisa dipakai untuk push berikutnya.
+	if orgs := remoteOrgs(rows); len(orgs) > 0 {
+		if orgErr := s.store.SetOrgs(orgs); orgErr != nil {
+			log.Printf("simpan org dari Supabase gagal: %v", orgErr)
+		}
+	}
 	if err == nil {
 		if total, alive, testErr := client.Test(ctx); testErr == nil {
 			s.setLastRemote(total, alive)
@@ -1522,6 +1588,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		SupabaseTable       *string         `json:"supabase_table"`
 		SupabaseAutoPush    *bool           `json:"supabase_auto_push"`
 		SupabasePullLimit   *int            `json:"supabase_pull_limit"`
+		PushOrgCap          *int            `json:"push_org_cap"`
+		PushCountryCap      *int            `json:"push_country_cap"`
 		ScheduleMode        *string         `json:"schedule_mode"`
 		DailyAt             *string         `json:"daily_at"`
 		PipelineEnabled     *bool           `json:"pipeline_enabled"`
@@ -1614,6 +1682,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if patch.SupabasePullLimit != nil {
 		cfg.SupabasePullLimit = *patch.SupabasePullLimit
 	}
+	if patch.PushOrgCap != nil {
+		cfg.PushOrgCap = *patch.PushOrgCap
+	}
+	if patch.PushCountryCap != nil {
+		cfg.PushCountryCap = *patch.PushCountryCap
+	}
 	if patch.ScheduleMode != nil {
 		cfg.ScheduleMode = strings.TrimSpace(*patch.ScheduleMode)
 	}
@@ -1705,6 +1779,8 @@ func publicSettings(cfg settings.Settings) map[string]any {
 		"supabase_table":           cfg.SupabaseTable,
 		"supabase_auto_push":       cfg.SupabaseAutoPush,
 		"supabase_pull_limit":      cfg.SupabasePullLimit,
+		"push_org_cap":             cfg.PushOrgCap,
+		"push_country_cap":         cfg.PushCountryCap,
 		"schedule_mode":            cfg.ScheduleMode,
 		"daily_at":                 cfg.DailyAt,
 		"pipeline_enabled":         cfg.PipelineEnabled,

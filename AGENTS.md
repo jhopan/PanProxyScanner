@@ -112,7 +112,7 @@ go build -ldflags "-X main.version=v0.1.0" -o panproxyscanner.exe .
 ## Aturan kualitas pool (jangan dilonggarkan tanpa alasan)
 
 - `push` hanya memakai verdict **≤90 menit** (`pushMaxAge`), butuh **`ok_count ≥ 2`**, melewati
-  proxy dengan `fail_count > ok_count`, dan mendedup **alamat keluar per /24**.
+  proxy dengan `fail_count > ok_count`, dan mendedup **alamat keluar per /24**. Sejak 15 Nov juga membatasi jumlah baris per `org` (`push_org_cap`, bawaan 25) dan per negara (`push_country_cap`, bawaan 60) per push; `0` = tanpa batas, nilai negatif dikembalikan ke bawaan. Yang dipertahankan saat cap tercapai adalah baris dengan skor tertinggi. Kolom `org` kini ikut dialirkan (Pull Supabase -> db lokal -> payload push) sehingga push tidak lagi mengosongkan `org` (sebelumnya selalu dikirim kosong, membuat filter penyedia di generator tidak akurat).
 - Hanya proxy dengan bukti TLS 443 yang boleh naik ke `is_active=true`; yang terbukti tidak
   sanggup TLS justru diturunkan.
 - `pull-verify` dan cron worker panel **tidak boleh** menyalakan baris (mereka hanya mematikan).

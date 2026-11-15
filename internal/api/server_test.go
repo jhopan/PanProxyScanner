@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/jhopan/Pan-ProxyScanner/internal/scraper"
 	"io"
 	"net/http"
@@ -800,5 +801,255 @@ func TestPoolPurgeRouteIsPublicWithCORS(t *testing.T) {
 		strings.NewReader(`{"username":"budi","hash":"hash-sesi"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST tanpa sesi scanner harus diteruskan ke handler (200), dapat %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// pushRow adalah satu baris database uji untuk pengujian batas push.
+type pushRow struct {
+	ip      string
+	country string
+	org     string
+	ping    int // skor push = ok_count*100 - fail_count*25 - ping/10: makin kecil ping, makin tinggi
+	ok      int // berapa kali berhasil (0 = pakai 2, ambang minOK di pushToSupabase)
+	exit    string
+}
+
+// capTestStore menyiapkan database uji berisi baris hidup & segar. Exit IP default diberi
+// subnet /24 yang berbeda per baris supaya tidak saling mendedup (kecuali `exit` diisi).
+func capTestStore(t *testing.T, rows []pushRow) *store.Store {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "caps.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	refs := make([]store.OrgRef, 0, len(rows))
+	for i, row := range rows {
+		ok := row.ok
+		if ok == 0 {
+			ok = 2
+		}
+		exit := row.exit
+		if exit == "" {
+			exit = fmt.Sprintf("203.0.%d.1", i+1)
+		}
+		for range ok {
+			if err := st.RecordAlive(row.ip, 1080, "socks5", row.country, row.ping, 2, true, false, exit); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if row.org != "" {
+			refs = append(refs, store.OrgRef{IP: row.ip, Port: 1080, Org: row.org})
+		}
+	}
+	if err := st.SetOrgs(refs); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// capPush menjalankan pushToSupabase ke stub Supabase dan mengembalikan baris yang benar-benar
+// terkirim plus catatan sinkron yang tercatat.
+func capPush(t *testing.T, st *store.Store, cfg settings.Settings) ([]map[string]any, string) {
+	t.Helper()
+	var mu sync.Mutex
+	var got []map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			var rows []map[string]any
+			_ = json.Unmarshal(body, &rows)
+			mu.Lock()
+			got = append(got, rows...)
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Range", "0-0/0")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer ts.Close()
+
+	client := supabase.New(ts.URL, "kunci-uji", "proxy_pool")
+	srv := &Server{store: st}
+	if _, _, err := srv.pushToSupabase(context.Background(), client, cfg, 100, nil, time.Now().Add(-24*time.Hour)); err != nil {
+		t.Fatalf("push ke stub harus sukses: %v", err)
+	}
+	srv.stateMu.Lock()
+	note, _ := srv.lastSync["note"].(string)
+	srv.stateMu.Unlock()
+	return got, note
+}
+
+// rowsWith menjumlahkan baris payload yang nilai `key`-nya sama dengan `value`.
+func rowsWith(rows []map[string]any, key, value string) int {
+	n := 0
+	for _, row := range rows {
+		if got, _ := row[key].(string); got == value {
+			n++
+		}
+	}
+	return n
+}
+
+// ips mengambil kolom ip dari payload supaya urutan pilihan (skor tertinggi dulu) bisa diuji.
+func ips(rows []map[string]any) []string {
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ip, _ := row["ip"].(string)
+		out = append(out, ip)
+	}
+	return out
+}
+
+// push_org_cap: satu penyedia (org) tidak boleh melebihi jatahnya, dan yang dipertahankan
+// adalah baris dengan skor tertinggi (ping terkecil), karena urutan seleksi push = urut skor.
+func TestPushOrgCapKeepsTopScores(t *testing.T) {
+	st := capTestStore(t, []pushRow{
+		{ip: "1.1.1.1", country: "ID", org: "Hetzner", ping: 100},
+		{ip: "2.2.2.2", country: "SG", org: "Hetzner", ping: 900},
+		{ip: "3.3.3.3", country: "MY", org: "Hetzner", ping: 1900},
+		{ip: "4.4.4.4", country: "JP", org: "OVH", ping: 500},
+	})
+	cfg := settings.Default()
+	cfg.PushOrgCap = 2
+	cfg.PushCountryCap = 0 // isolasi: yang diuji hanya batas org
+
+	got, note := capPush(t, st, cfg)
+	if len(got) != 3 {
+		t.Fatalf("2 baris Hetzner + 1 baris OVH harus terkirim, dapat %d (%v)", len(got), ips(got))
+	}
+	if n := rowsWith(got, "org", "Hetzner"); n != 2 {
+		t.Fatalf("org Hetzner harus dibatasi 2 baris, dapat %d", n)
+	}
+	if n := rowsWith(got, "org", "OVH"); n != 1 {
+		t.Fatalf("org OVH harus tetap terkirim, dapat %d", n)
+	}
+	kept := ips(got)
+	for _, ip := range kept {
+		if ip == "3.3.3.3" {
+			t.Fatalf("baris Hetzner berskor terendah (ping terbesar) yang harus ditahan, dapat %v", kept)
+		}
+	}
+	if note == "" || !strings.Contains(note, "1 ditahan (batas org/negara)") {
+		t.Fatalf("catatan sinkron harus menyebut baris yang ditahan batas org/negara, dapat %q", note)
+	}
+}
+
+// push_country_cap: batas per negara bekerja sama seperti batas org, dan kolom org ikut
+// dikirim apa adanya (tidak lagi dikosongkan saat upsert).
+func TestPushCountryCapKeepsTopScores(t *testing.T) {
+	st := capTestStore(t, []pushRow{
+		{ip: "1.1.1.1", country: "id", org: "Hetzner", ping: 100},
+		{ip: "2.2.2.2", country: "ID", org: "OVH", ping: 900},
+		{ip: "3.3.3.3", country: "ID", org: "DigitalOcean", ping: 1900},
+		{ip: "4.4.4.4", country: "SG", org: "Vultr", ping: 500},
+	})
+	cfg := settings.Default()
+	cfg.PushOrgCap = 0 // isolasi: yang diuji hanya batas negara
+	cfg.PushCountryCap = 2
+
+	got, note := capPush(t, st, cfg)
+	if len(got) != 3 {
+		t.Fatalf("2 baris ID + 1 baris SG harus terkirim, dapat %d (%v)", len(got), ips(got))
+	}
+	if n := rowsWith(got, "country", "ID"); n != 2 {
+		t.Fatalf("negara ID harus dibatasi 2 baris, dapat %d", n)
+	}
+	if n := rowsWith(got, "country", "SG"); n != 1 {
+		t.Fatalf("negara SG harus tetap terkirim, dapat %d", n)
+	}
+	if n := rowsWith(got, "ip", "3.3.3.3"); n != 0 {
+		t.Fatal("baris ID berskor terendah yang harus ditahan")
+	}
+	if !strings.Contains(note, "1 ditahan (batas org/negara)") {
+		t.Fatalf("catatan sinkron harus menyebut baris yang ditahan batas org/negara, dapat %q", note)
+	}
+	if n := rowsWith(got, "org", "Hetzner"); n != 1 {
+		t.Fatal("kolom org harus ikut dikirim, bukan dikosongkan")
+	}
+}
+
+// Batas 0 = tanpa batas (bawaan bisa dimatikan operator).
+func TestPushCapsZeroMeansUnlimited(t *testing.T) {
+	st := capTestStore(t, []pushRow{
+		{ip: "1.1.1.1", country: "ID", org: "Hetzner", ping: 100},
+		{ip: "2.2.2.2", country: "ID", org: "Hetzner", ping: 900},
+		{ip: "3.3.3.3", country: "ID", org: "Hetzner", ping: 1900},
+		{ip: "4.4.4.4", country: "ID", org: "Hetzner", ping: 2500},
+	})
+	cfg := settings.Default()
+	cfg.PushOrgCap = 0
+	cfg.PushCountryCap = 0
+
+	got, note := capPush(t, st, cfg)
+	if len(got) != 4 {
+		t.Fatalf("cap 0 harus mengirim semua baris, dapat %d", len(got))
+	}
+	if strings.Contains(note, "batas org/negara") {
+		t.Fatalf("tanpa batas tidak boleh ada baris yang ditahan, dapat %q", note)
+	}
+}
+
+// Baris tanpa org (belum pernah terlihat di tabel Supabase) bukan "satu org yang sama":
+// cap org tidak boleh menahannya.
+func TestPushOrgCapSkipsRowsWithoutOrg(t *testing.T) {
+	st := capTestStore(t, []pushRow{
+		{ip: "1.1.1.1", country: "ID", ping: 100},
+		{ip: "2.2.2.2", country: "SG", ping: 900},
+		{ip: "3.3.3.3", country: "MY", ping: 1900},
+		{ip: "4.4.4.4", country: "JP", org: "Hetzner", ping: 500},
+		{ip: "5.5.5.5", country: "KR", org: "Hetzner", ping: 700},
+	})
+	cfg := settings.Default()
+	cfg.PushOrgCap = 1
+	cfg.PushCountryCap = 0
+
+	got, note := capPush(t, st, cfg)
+	if n := rowsWith(got, "org", ""); n != 3 {
+		t.Fatalf("3 baris tanpa org harus tetap terkirim, dapat %d (%v)", n, ips(got))
+	}
+	if n := rowsWith(got, "org", "Hetzner"); n != 1 {
+		t.Fatalf("org Hetzner harus dibatasi 1 baris, dapat %d", n)
+	}
+	if !strings.Contains(note, "1 ditahan (batas org/negara)") {
+		t.Fatalf("catatan sinkron harus menyebut 1 baris yang ditahan, dapat %q", note)
+	}
+}
+
+// Batas baru tidak boleh melemahkan saringan lama: dedup exit IP per /24 dan syarat
+// ok_count ≥ 2 tetap berlaku.
+func TestPushCapsKeepDedupAndOKCountRules(t *testing.T) {
+	st := capTestStore(t, []pushRow{
+		{ip: "1.1.1.1", country: "ID", org: "Hetzner", ping: 100, exit: "198.51.100.7"},
+		{ip: "2.2.2.2", country: "ID", org: "OVH", ping: 200, exit: "198.51.100.99"}, // /24 sama
+		{ip: "3.3.3.3", country: "ID", org: "Vultr", ping: 300, ok: 1},               // baru 1× berhasil
+	})
+	cfg := settings.Default() // bawaan 25 org / 60 negara: tidak ikut membatasi kasus ini
+
+	got, note := capPush(t, st, cfg)
+	if len(got) != 1 || ips(got)[0] != "1.1.1.1" {
+		t.Fatalf("hanya baris pertama yang boleh terkirim (exit /24 sama, ok_count 1), dapat %v", ips(got))
+	}
+	if !strings.Contains(note, "1 ditahan (baru 1× berhasil)") {
+		t.Fatalf("baris ok_count 1 harus tetap ditahan, dapat %q", note)
+	}
+	if !strings.Contains(note, "1 dilewati (exit IP sama)") {
+		t.Fatalf("dedup exit IP per /24 harus tetap berlaku, dapat %q", note)
+	}
+}
+
+// org yang dibaca dari tabel Supabase disimpan di database lokal: itu satu-satunya sumber
+// nilai org, dan tanpanya batas org tidak pernah bisa bekerja.
+func TestRemoteOrgsKeepsOnlyUsableRows(t *testing.T) {
+	refs := remoteOrgs([]supabase.Row{
+		{IP: "1.1.1.1", Port: "1080", Org: "Hetzner"},
+		{IP: "2.2.2.2", Port: "1080", Org: "  "},
+		{IP: "3.3.3.3", Port: "bukan-angka", Org: "OVH"},
+		{IP: "4.4.4.4", Port: "8080", Org: "OVH"},
+	})
+	if len(refs) != 2 {
+		t.Fatalf("hanya baris ber-org & ber-port angka yang boleh disimpan, dapat %+v", refs)
+	}
+	if refs[0].Org != "Hetzner" || refs[1].Port != 8080 {
+		t.Fatalf("isi refs tidak sesuai: %+v", refs)
 	}
 }
