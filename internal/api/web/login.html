@@ -24,7 +24,6 @@
   .msg { margin-top:14px; font-size:13px; min-height:18px; }
   .msg.err { color:var(--err); }
   .msg.ok { color:var(--ok); }
-  .hint { margin-top:18px; padding-top:14px; border-top:1px solid var(--border); color:var(--muted); font-size:12px; }
   code { background:var(--panel2); padding:2px 6px; border-radius:6px; }
 </style>
 </head>
@@ -43,12 +42,6 @@
 
   <button id="btn" type="submit">Masuk</button>
   <div class="msg" id="msg"></div>
-
-  <div class="hint">
-    Username &amp; sandi diatur di menu <b>Scheduler &amp; pengaturan</b> setelah masuk — tersimpan sebagai
-    <code>admin_user</code> dan hash SHA-256 <code>admin_password_hash</code> di
-    <code>~/.panproxyscanner/settings.json</code>. Lupa sandi? Ubah berkas itu lalu jalankan ulang layanannya.
-  </div>
 </form>
 
 <script>
