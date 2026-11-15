@@ -213,7 +213,7 @@
           <div class="row">
             <label>URL project<input id="sbUrl" placeholder="https://xxxx.supabase.co" size="38"></label>
             <label>Key (anon/service)<input id="sbKey" type="password" placeholder="kosongkan bila tidak diganti" size="34"></label>
-            <label>Service key (hanya untuk hapus/prune; opsional)<input id="sbServiceKey" type="password" placeholder="kosongkan bila tidak diganti" size="34"></label>
+            <label>Service key (untuk semua operasi tulis: push/MarkDead/prune/backup; opsional)<input id="sbServiceKey" type="password" placeholder="kosongkan bila tidak diganti" size="34"></label>
             <label>Tabel<input id="sbTable" placeholder="proxy_pool" size="14"></label>
             <button class="primary" id="btnSbSave">Simpan</button>
             <button class="ghost" id="btnSbTest">Tes koneksi</button>
@@ -619,7 +619,7 @@ async function loadSupabase() {
   const last = data.last_sync ? `${data.last_sync.at} — ${data.last_sync.note}${data.last_sync.error ? " (error: " + data.last_sync.error + ")" : ""}` : "belum ada sinkronisasi";
   $("sbStatus").innerHTML = [
     `status: ${data.configured ? "<b>terkonfigurasi</b>" : "belum diisi"}`,
-    data.has_service_key ? "prune: service key siap" : "prune: butuh service key",
+    data.has_service_key ? "tulis: service key" : "tulis: anon (butuh service key untuk push/prune/backup)",
     data.remote_total != null ? `baris di Supabase: <b>${data.remote_total}</b> (aktif ${data.remote_alive})` : "",
     data.remote_error ? `error: ${data.remote_error}` : "",
     `sinkron terakhir: ${last}`,

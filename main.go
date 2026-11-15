@@ -290,6 +290,8 @@ func runServe(ctx context.Context) error {
 	sched.Store = st
 	apiServer := api.New(st, runner, sched, &cfg, cfgPath, effAddr)
 	apiServer.SetEnvPath(*flagEnv)
+	// Folder data scanner (tempat berkas DB) juga jadi induk folder backup state: <dataDir>/backups.
+	apiServer.SetDataDir(filepath.Dir(effDB))
 	// Setiap siklus selesai: dorong hasil ke Supabase dan/atau verifikasi baris lama.
 	runner.OnFinish = func(scraper.Progress, []scraper.SourceStat) { apiServer.AfterCycle() }
 	// Jadwal (interval/harian) menjalankan pipeline penuh kalau PipelineEnabled aktif.

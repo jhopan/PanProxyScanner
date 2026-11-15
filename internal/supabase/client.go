@@ -97,11 +97,33 @@ func New(baseURL, key, table string) *Client {
 	}
 }
 
+// NewForWrite membuat klien untuk operasi TULIS: memakai `serviceKey` kalau terisi, kalau
+// kosong jatuh ke `anonKey` (pemanggil yang mencatat fallback itu di log/ringkasan sinkron).
+// Nilai kedua menandakan apakah service key yang dipakai — panel mencabut hak tulis anon pada
+// proxy_pool, jadi pemanggil perlu tahu key mana yang sedang membawa request.
+func NewForWrite(baseURL, anonKey, serviceKey, table string) (*Client, bool) {
+	if key := strings.TrimSpace(serviceKey); key != "" {
+		return New(baseURL, key, table), true
+	}
+	return New(baseURL, anonKey, table), false
+}
+
 // Configured menandakan kredensial sudah diisi.
 func (c *Client) Configured() bool { return c != nil && c.BaseURL != "" && c.Key != "" }
 
+// endpointOf menyusun URL REST untuk tabel apa pun — dipakai tabel di luar `c.Table`
+// (mis. `user_states` untuk backup) supaya klien tetap satu pintu.
+func (c *Client) endpointOf(table, query string) string {
+	return fmt.Sprintf("%s/rest/v1/%s%s", c.BaseURL, table, query)
+}
+
+// rpc menyusun URL pemanggilan fungsi PostgREST (`/rest/v1/rpc/<nama>`).
+func (c *Client) rpc(function string) string {
+	return fmt.Sprintf("%s/rest/v1/rpc/%s", c.BaseURL, function)
+}
+
 func (c *Client) endpoint(query string) string {
-	return fmt.Sprintf("%s/rest/v1/%s%s", c.BaseURL, c.Table, query)
+	return c.endpointOf(c.Table, query)
 }
 
 func (c *Client) headers(extra map[string]string) http.Header {
@@ -590,6 +612,141 @@ func (c *Client) PullEdgeVerdicts(ctx context.Context, limit int) (map[string]bo
 		if row.TunnelOK != nil {
 			out[row.IP+":"+row.Port] = *row.TunnelOK
 		}
+	}
+	return out, nil
+}
+
+// CountRows menghitung seluruh baris tabel (HEAD count=exact) dalam satu request.
+func (c *Client) CountRows(ctx context.Context) (int, error) {
+	if !c.Configured() {
+		return 0, fmt.Errorf("url atau key Supabase belum diisi")
+	}
+	resp, _, err := c.do(ctx, http.MethodHead, c.endpoint("?select=id"), nil,
+		map[string]string{"Prefer": "count=exact", "Range": "0-1"})
+	if err != nil {
+		return 0, err
+	}
+	return parseCount(resp.Header.Get("Content-Range")), nil
+}
+
+// DeployLogTrimRPC adalah nama fungsi retensi riwayat deploy di Supabase
+// (lihat cfvpn-hub/sql/2026-11-15-deploy-log-trim.sql). Parameter masuknya `p_keep_days`,
+// balasannya jumlah baris yang dihapus.
+const DeployLogTrimRPC = "deploy_log_trim"
+
+// DeployLogKeepDays adalah retensi bawaan riwayat deploy (hari).
+const DeployLogKeepDays = 30
+
+// TrimDeployLog memanggil RPC `deploy_log_trim(p_keep_days)` yang menghapus baris `deploy_log`
+// lebih tua dari `keepDays`. Fungsi itu SECURITY DEFINER dan EXECUTE-nya hanya diberikan ke
+// service_role, jadi pemanggil wajib memakai klien ber-service key.
+func (c *Client) TrimDeployLog(ctx context.Context, keepDays int) (int, error) {
+	if !c.Configured() {
+		return 0, fmt.Errorf("url atau key Supabase belum diisi")
+	}
+	if keepDays <= 0 {
+		keepDays = DeployLogKeepDays
+	}
+	resp, data, err := c.do(ctx, http.MethodPost, c.rpc(DeployLogTrimRPC),
+		map[string]any{"p_keep_days": keepDays}, nil)
+	if err != nil {
+		return 0, err
+	}
+	if err := errorFrom(resp, data); err != nil {
+		return 0, err
+	}
+	// PostgREST mengembalikan nilai fungsi apa adanya: `12`, atau `null` kalau fungsinya
+	// mengembalikan NULL.
+	var deleted *int
+	if err := json.Unmarshal(data, &deleted); err != nil {
+		return 0, fmt.Errorf("balasan %s bukan angka: %w", DeployLogTrimRPC, err)
+	}
+	if deleted == nil {
+		return 0, nil
+	}
+	return *deleted, nil
+}
+
+// UserStateTable adalah tabel state per user di panel CFVPN Hub.
+const UserStateTable = "user_states"
+
+// UserStateBackupSelect adalah daftar kolom `user_states` yang boleh disalin ke berkas
+// backup. Kolom ditulis eksplisit — tidak pernah `select=*` — supaya kolom baru (mis. kolom
+// sandi/hash kalau tabelnya berubah) tidak pernah ikut terbawa tanpa keputusan sadar.
+const UserStateBackupSelect = "username,state_data,updated_at"
+
+// UserState adalah satu baris `user_states`: nama kolom → nilai mentah JSON-nya. Bentuk peta
+// dipakai supaya penyaringan kolom sensitif bisa diperiksa per kolom sebelum ditulis ke berkas.
+type UserState map[string]json.RawMessage
+
+// userStateColumns adalah allowlist kolom backup, hasil pecahan UserStateBackupSelect.
+var userStateColumns = strings.Split(UserStateBackupSelect, ",")
+
+// sensitiveUserStateColumn menandai nama kolom yang tidak boleh ikut ke berkas backup: apa pun
+// yang mengandung sandi/hash/rahasia/kunci. Ini pertahanan berlapis — kolomnya sudah tidak
+// pernah diminta ke PostgREST, tetapi nama kolom baru yang sensitif tidak boleh lolos hanya
+// karena suatu saat ikut ditambahkan ke allowlist.
+func sensitiveUserStateColumn(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	for _, fragment := range []string{"password", "passwd", "pwd", "hash", "secret", "service_key", "api_key", "credential"} {
+		if strings.Contains(lower, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+// sanitizeUserState menyaring satu baris `user_states` menjadi hanya kolom allowlist yang tidak
+// sensitif. Nilai kolom `state_data` dibiarkan apa adanya: isinya (daftar worker, token
+// langganan LB, uuid) justru data yang dipulihkan dari backup, dan yang tidak boleh disalin
+// adalah kolom sandi/hash — bukan muatan state pengguna.
+func sanitizeUserState(row map[string]json.RawMessage) UserState {
+	clean := make(UserState, len(userStateColumns))
+	for _, column := range userStateColumns {
+		column = strings.TrimSpace(column)
+		if column == "" || sensitiveUserStateColumn(column) {
+			continue
+		}
+		value, ok := row[column]
+		if !ok {
+			continue
+		}
+		clean[column] = value
+	}
+	return clean
+}
+
+// FetchUserStates membaca `user_states` untuk backup. Kolomnya eksplisit (lihat
+// UserStateBackupSelect) dan hasilnya disaring lagi oleh sanitizeUserState, jadi sandi/hash
+// tidak pernah masuk berkas. Limit <= 0 berarti tanpa batas.
+func (c *Client) FetchUserStates(ctx context.Context, limit int) ([]UserState, error) {
+	if !c.Configured() {
+		return nil, fmt.Errorf("url atau key Supabase belum diisi")
+	}
+	query := url.Values{}
+	query.Set("select", UserStateBackupSelect)
+	query.Set("order", "username.asc")
+	if limit > 0 {
+		query.Set("limit", strconv.Itoa(limit))
+	}
+	resp, data, err := c.do(ctx, http.MethodGet, c.endpointOf(UserStateTable, "?"+query.Encode()), nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := errorFrom(resp, data); err != nil {
+		return nil, err
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, fmt.Errorf("balasan %s bukan JSON: %w", UserStateTable, err)
+	}
+	out := make([]UserState, 0, len(rows))
+	for _, row := range rows {
+		clean := sanitizeUserState(row)
+		if len(clean) == 0 {
+			continue
+		}
+		out = append(out, clean)
 	}
 	return out, nil
 }

@@ -8,16 +8,24 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jhopan/Pan-ProxyScanner/internal/auth"
 	"github.com/jhopan/Pan-ProxyScanner/internal/settings"
 	"github.com/jhopan/Pan-ProxyScanner/internal/store"
 	"github.com/jhopan/Pan-ProxyScanner/internal/supabase"
 )
+
+// testClients membungkus satu klien stub sebagai pasangan baca/tulis untuk memanggil
+// pushToSupabase/pullVerify langsung dari tes (tanpa service key, jadi tanpa catatan fallback).
+func testClients(client *supabase.Client) supabaseClients {
+	return supabaseClients{read: client, write: client}
+}
 
 // exitKey dipakai untuk dedup alamat keluar di pool: IPv4 dinormalkan per /24 supaya
 // beberapa port dari subnet yang sama tidak memenuhi pool, IPv6 dibiarkan utuh.
@@ -97,7 +105,7 @@ func TestPushSinceSendsOnlyChanged(t *testing.T) {
 	cfg := settings.Default()
 
 	// Penanda di masa depan: belum ada baris yang berubah, jadi tidak ada yang dikirim.
-	sentNew, _, err := srv.pushToSupabase(context.Background(), client, cfg, 100, nil, time.Now().Add(24*time.Hour))
+	sentNew, _, err := srv.pushToSupabase(context.Background(), testClients(client), cfg, 100, nil, time.Now().Add(24*time.Hour))
 	if err != nil {
 		t.Fatalf("push delta tanpa perubahan bukan kegagalan: %v", err)
 	}
@@ -106,7 +114,7 @@ func TestPushSinceSendsOnlyChanged(t *testing.T) {
 	}
 
 	// Penanda di masa lalu: ketiga baris ikut terkirim.
-	sentOld, _, err := srv.pushToSupabase(context.Background(), client, cfg, 100, nil, time.Now().Add(-24*time.Hour))
+	sentOld, _, err := srv.pushToSupabase(context.Background(), testClients(client), cfg, 100, nil, time.Now().Add(-24*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +182,7 @@ func TestPushSendsHostTunnelEvidence(t *testing.T) {
 
 	client := supabase.New(ts.URL, "kunci-uji", "proxy_pool")
 	srv := &Server{store: st}
-	sent, _, err := srv.pushToSupabase(context.Background(), client, settings.Default(), 100, nil, time.Now().Add(-24*time.Hour))
+	sent, _, err := srv.pushToSupabase(context.Background(), testClients(client), settings.Default(), 100, nil, time.Now().Add(-24*time.Hour))
 	if err != nil {
 		t.Fatalf("push ke stub harus sukses: %v", err)
 	}
@@ -266,7 +274,7 @@ func TestPushToleratesMissingHostEvidenceColumns(t *testing.T) {
 
 			client := supabase.New(ts.URL, "kunci-uji", "proxy_pool")
 			srv := &Server{store: st}
-			sent, _, err := srv.pushToSupabase(context.Background(), client, settings.Default(), 100, nil, time.Now().Add(-24*time.Hour))
+			sent, _, err := srv.pushToSupabase(context.Background(), testClients(client), settings.Default(), 100, nil, time.Now().Add(-24*time.Hour))
 			if err != nil {
 				t.Fatalf("penolakan kolom tunnel_host_* bukan kegagalan push: %v", err)
 			}
@@ -349,7 +357,7 @@ func TestPushKeepsEvidenceColumnsOnNonColumnError(t *testing.T) {
 
 			client := supabase.New(ts.URL, "kunci-uji", "proxy_pool")
 			srv := &Server{store: st}
-			if _, _, err := srv.pushToSupabase(context.Background(), client, settings.Default(), 100, nil, time.Now().Add(-24*time.Hour)); err == nil {
+			if _, _, err := srv.pushToSupabase(context.Background(), testClients(client), settings.Default(), 100, nil, time.Now().Add(-24*time.Hour)); err == nil {
 				t.Fatalf("stub membalas %d: push harus melaporkan error", tc.status)
 			}
 			mu.Lock()
@@ -362,7 +370,7 @@ func TestPushKeepsEvidenceColumnsOnNonColumnError(t *testing.T) {
 			mu.Lock()
 			fail = false
 			mu.Unlock()
-			sent, _, err := srv.pushToSupabase(context.Background(), client, settings.Default(), 100, nil, time.Now().Add(-24*time.Hour))
+			sent, _, err := srv.pushToSupabase(context.Background(), testClients(client), settings.Default(), 100, nil, time.Now().Add(-24*time.Hour))
 			if err != nil {
 				t.Fatalf("push berikutnya harus sukses: %v", err)
 			}
@@ -870,7 +878,7 @@ func capPush(t *testing.T, st *store.Store, cfg settings.Settings) ([]map[string
 
 	client := supabase.New(ts.URL, "kunci-uji", "proxy_pool")
 	srv := &Server{store: st}
-	if _, _, err := srv.pushToSupabase(context.Background(), client, cfg, 100, nil, time.Now().Add(-24*time.Hour)); err != nil {
+	if _, _, err := srv.pushToSupabase(context.Background(), testClients(client), cfg, 100, nil, time.Now().Add(-24*time.Hour)); err != nil {
 		t.Fatalf("push ke stub harus sukses: %v", err)
 	}
 	srv.stateMu.Lock()
@@ -1051,5 +1059,407 @@ func TestRemoteOrgsKeepsOnlyUsableRows(t *testing.T) {
 	}
 	if refs[0].Org != "Hetzner" || refs[1].Port != 8080 {
 		t.Fatalf("isi refs tidak sesuai: %+v", refs)
+	}
+}
+
+// --------------------------------------------------- service key: pilih klien tulis + fallback
+
+// Operasi tulis memilih klien ber-service key saat key itu terisi, dan jatuh ke anon (dengan
+// catatan) saat kosong; operasi baca tetap anon.
+func TestSupabaseWriteClientPrefersServiceKey(t *testing.T) {
+	cfg := settings.Default()
+	cfg.SupabaseURL = "https://contoh.test"
+	cfg.SupabaseKey = "kunci-anon"
+	cfg.SupabaseServiceKey = "kunci-service"
+	srv := &Server{settings: &cfg}
+
+	clients := srv.supabaseClients()
+	if clients.write.Key != "kunci-service" {
+		t.Fatalf("tulis harus memakai service key, dapat %q", clients.write.Key)
+	}
+	if clients.read.Key != "kunci-anon" {
+		t.Fatalf("baca tetap anon, dapat %q", clients.read.Key)
+	}
+	if clients.note != "" {
+		t.Fatalf("service key terisi: tidak boleh ada catatan fallback, dapat %q", clients.note)
+	}
+
+	cfg.SupabaseServiceKey = ""
+	fallback := (&Server{settings: &cfg}).supabaseClients()
+	if fallback.write.Key != "kunci-anon" {
+		t.Fatalf("tanpa service key tulis harus jatuh ke anon, dapat %q", fallback.write.Key)
+	}
+	if !strings.Contains(fallback.note, "supabase_service_key") {
+		t.Fatalf("catatan fallback harus menyebut supabase_service_key, dapat %q", fallback.note)
+	}
+}
+
+// Push (upsert) benar-benar membawa service key saat terisi; tanpa key itu requestnya memakai
+// anon dan catatannya muncul di ringkasan sinkron (bukan hanya di log).
+func TestPushWritesWithServiceKeyAndNotesAnonFallback(t *testing.T) {
+	st := capTestStore(t, []pushRow{{ip: "1.1.1.1", country: "ID", org: "Hetzner", ping: 100}})
+	var mu sync.Mutex
+	var postAuth []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			mu.Lock()
+			postAuth = append(postAuth, r.Header.Get("Authorization"))
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Range", "0-0/1")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer ts.Close()
+
+	cfg := settings.Default()
+	cfg.SupabaseURL = ts.URL
+	cfg.SupabaseKey = "kunci-anon"
+	cfg.SupabaseServiceKey = "kunci-service"
+	srv := &Server{store: st, settings: &cfg}
+	if _, _, err := srv.pushToSupabase(context.Background(), srv.supabaseClients(), cfg, 100, nil, time.Now().Add(-24*time.Hour)); err != nil {
+		t.Fatalf("push dengan service key harus sukses: %v", err)
+	}
+
+	cfg.SupabaseServiceKey = ""
+	srvAnon := &Server{store: st, settings: &cfg}
+	if _, _, err := srvAnon.pushToSupabase(context.Background(), srvAnon.supabaseClients(), cfg, 100, nil, time.Now().Add(-24*time.Hour)); err != nil {
+		t.Fatalf("push dengan anon key harus tetap jalan (Supabase yang menolak, bukan scanner): %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(postAuth) != 2 {
+		t.Fatalf("harus ada 2 upsert (service lalu anon), dapat %v", postAuth)
+	}
+	if postAuth[0] != "Bearer kunci-service" {
+		t.Fatalf("upsert pertama harus memakai service key, dapat %q", postAuth[0])
+	}
+	if postAuth[1] != "Bearer kunci-anon" {
+		t.Fatalf("tanpa service key upsert harus memakai anon, dapat %q", postAuth[1])
+	}
+
+	srv.stateMu.Lock()
+	noteService := srv.lastSync["note"].(string)
+	srv.stateMu.Unlock()
+	if strings.Contains(noteService, "supabase_service_key") {
+		t.Fatalf("service key terisi: ringkasan sinkron tidak boleh menyebut fallback anon, dapat %q", noteService)
+	}
+	srvAnon.stateMu.Lock()
+	noteAnon := srvAnon.lastSync["note"].(string)
+	srvAnon.stateMu.Unlock()
+	if !strings.Contains(noteAnon, "supabase_service_key") {
+		t.Fatalf("tanpa service key ringkasan sinkron harus memuat catatan fallback, dapat %q", noteAnon)
+	}
+}
+
+// ---------------------------------------------------------------- retensi deploy_log (trim RPC)
+
+// RPC retensi dipanggil dengan parameter & key yang benar: POST /rest/v1/rpc/deploy_log_trim
+// berisi {"p_keep_days":30} dan Authorization memakai service key.
+func TestDeployLogTrimStepUsesServiceKeyAndKeepDays(t *testing.T) {
+	var mu sync.Mutex
+	var path, auth string
+	var body map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		path, auth = r.URL.Path, r.Header.Get("Authorization")
+		_ = json.Unmarshal(raw, &body)
+		mu.Unlock()
+		_, _ = w.Write([]byte(`7`))
+	}))
+	defer ts.Close()
+
+	cfg := settings.Default()
+	cfg.SupabaseURL = ts.URL
+	cfg.SupabaseKey = "kunci-anon"
+	cfg.SupabaseServiceKey = "kunci-service"
+	srv := &Server{settings: &cfg}
+
+	step := srv.trimDeployLogStep(context.Background(), false)
+	if !step.OK {
+		t.Fatalf("trim selalu best-effort: OK harus true, dapat %+v", step)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if path != "/rest/v1/rpc/deploy_log_trim" {
+		t.Fatalf("RPC harus dipanggil di /rest/v1/rpc/deploy_log_trim, dapat %q", path)
+	}
+	if auth != "Bearer kunci-service" {
+		t.Fatalf("RPC hanya boleh dipanggil dengan service key, dapat %q", auth)
+	}
+	if got, _ := body["p_keep_days"].(float64); got != 30 {
+		t.Fatalf("p_keep_days harus 30, dapat %v", body["p_keep_days"])
+	}
+	if step.Counts["dihapus"] != 7 || !strings.Contains(step.Note, "7 baris") {
+		t.Fatalf("balasan RPC (7) harus muncul di langkah, dapat %+v", step)
+	}
+}
+
+// Kegagalan RPC (fungsi belum dijalankan, 5xx, key salah) hanya jadi catatan langkah: OK tetap
+// true dan status pipeline tidak pernah diisi error. Tanpa service key, RPC-nya tidak dipanggil
+// sama sekali.
+func TestDeployLogTrimFailureDoesNotFailPipeline(t *testing.T) {
+	var mu sync.Mutex
+	requests := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":"PGRST202","message":"Could not find the function public.deploy_log_trim"}`))
+	}))
+	defer ts.Close()
+
+	cfg := settings.Default()
+	cfg.SupabaseURL = ts.URL
+	cfg.SupabaseKey = "kunci-anon"
+	cfg.SupabaseServiceKey = "kunci-service"
+	srv := &Server{settings: &cfg}
+
+	step := srv.trimDeployLogStep(context.Background(), false)
+	if !step.OK {
+		t.Fatalf("kegagalan trim tidak boleh menandai langkah gagal, dapat %+v", step)
+	}
+	if !strings.Contains(step.Note, "best-effort") || !strings.Contains(step.Note, "PGRST202") {
+		t.Fatalf("catatan langkah harus memuat sebab kegagalan, dapat %q", step.Note)
+	}
+	srv.addPipelineStep(step)
+	srv.pipelineMu.Lock()
+	pipelineErr := srv.pipeline.Error
+	srv.pipelineMu.Unlock()
+	if pipelineErr != "" {
+		t.Fatalf("kegagalan trim tidak boleh mengisi error pipeline, dapat %q", pipelineErr)
+	}
+
+	mu.Lock()
+	calls := requests
+	mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("stub harus dipanggil sekali, dapat %d", calls)
+	}
+
+	cfg.SupabaseServiceKey = ""
+	srvNoKey := &Server{settings: &cfg}
+	skip := srvNoKey.trimDeployLogStep(context.Background(), false)
+	if !skip.OK || !strings.Contains(skip.Note, "supabase_service_key") {
+		t.Fatalf("tanpa service key langkah harus dilewati dengan catatan, dapat %+v", skip)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 1 {
+		t.Fatalf("tanpa service key RPC tidak boleh dipanggil, dapat %d request", requests)
+	}
+}
+
+// ------------------------------------------------------------------- backup state (user_states)
+
+// Backup menulis berkas dengan bentuk yang benar, tidak pernah memuat kolom sandi/hash (walau
+// Supabase mengirimnya), dan menyisakan 14 berkas terbaru.
+func TestStateBackupWritesSanitizedFileAndRotates(t *testing.T) {
+	dir := t.TempDir()
+	backupDir := filepath.Join(dir, "backups")
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// 15 berkas lama: dengan berkas hari ini, rotasi harus menyisakan 14 dan membuang 2 tertua.
+	for day := 1; day <= 15; day++ {
+		name := fmt.Sprintf("user_states-2026-01-%02d.json", day)
+		if err := os.WriteFile(filepath.Join(backupDir, name), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var mu sync.Mutex
+	var auths, paths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		auths = append(auths, r.Header.Get("Authorization"))
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/rest/v1/user_states"):
+			// Stub sengaja mengirim kolom sensitif yang TIDAK boleh ikut ke berkas backup.
+			_, _ = w.Write([]byte(`[
+				{"username":"budi","state_data":{"workers":[{"id":"w1","sub_token":"tok-lb-123"}]},"updated_at":"2026-11-15T00:00:00Z","password_hash":"hash-rahasia","api_key":"kunci-rahasia"},
+				{"username":"siti","state_data":{"workers":[]},"updated_at":"2026-11-15T00:00:00Z"}
+			]`))
+		case r.Method == http.MethodHead:
+			w.Header().Set("Content-Range", "0-0/9")
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer ts.Close()
+
+	cfg := settings.Default()
+	cfg.SupabaseURL = ts.URL
+	cfg.SupabaseKey = "kunci-anon"
+	cfg.SupabaseServiceKey = "kunci-service"
+	srv := &Server{settings: &cfg, dataDir: dir}
+
+	rec := httptest.NewRecorder()
+	srv.handleStateBackup(rec, httptest.NewRequest(http.MethodPost, "/api/state-backup", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("backup harus 200, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	var result stateBackupResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("balasan backup bukan JSON: %v", err)
+	}
+	wantPath := filepath.Join(backupDir, "user_states-"+time.Now().UTC().Format("2006-01-02")+".json")
+	if result.Path != wantPath {
+		t.Fatalf("path balasan harus %q, dapat %q", wantPath, result.Path)
+	}
+	if result.UserStates != 2 || result.ProxyPool != 9 {
+		t.Fatalf("jumlah baris balasan salah: user_states=%d proxy_pool=%d", result.UserStates, result.ProxyPool)
+	}
+	if result.GeneratedAt == "" {
+		t.Fatal("balasan harus memuat waktu backup")
+	}
+
+	raw, err := os.ReadFile(result.Path)
+	if err != nil {
+		t.Fatalf("berkas backup harus ada: %v", err)
+	}
+	if int64(len(raw)) != result.Bytes {
+		t.Fatalf("ukuran balasan (%d) harus sama dengan ukuran berkas (%d)", result.Bytes, len(raw))
+	}
+	for _, banned := range []string{"password", "hash-rahasia", "api_key", "kunci-rahasia", "password_hash"} {
+		if strings.Contains(string(raw), banned) {
+			t.Fatalf("berkas backup tidak boleh memuat %q: %s", banned, raw)
+		}
+	}
+	var file struct {
+		GeneratedAt     string                       `json:"generated_at"`
+		UserStatesCount int                          `json:"user_states_count"`
+		ProxyPoolCount  int                          `json:"proxy_pool_count"`
+		Truncated       bool                         `json:"truncated"`
+		UserStates      []map[string]json.RawMessage `json:"user_states"`
+	}
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatalf("berkas backup bukan JSON yang diharapkan: %v", err)
+	}
+	if file.GeneratedAt != result.GeneratedAt || file.UserStatesCount != 2 || file.ProxyPoolCount != 9 {
+		t.Fatalf("ringkasan di berkas tidak cocok: %+v", file)
+	}
+	if file.Truncated {
+		t.Fatal("2 baris jauh di bawah batas, berkas tidak boleh ditandai terpotong")
+	}
+	if len(file.UserStates) != 2 {
+		t.Fatalf("harus ada 2 baris user_states, dapat %d", len(file.UserStates))
+	}
+	first := file.UserStates[0]
+	for _, column := range []string{"username", "state_data", "updated_at"} {
+		if _, ok := first[column]; !ok {
+			t.Fatalf("kolom %q harus ikut tersalin, dapat %v", column, first)
+		}
+	}
+	// Muatan state pengguna disalin utuh (token langganan LB ada di dalam state_data, bukan
+	// kolom tabel), karena itu justru data yang dipulihkan dari backup.
+	if !strings.Contains(string(first["state_data"]), "sub_token") {
+		t.Fatalf("state_data harus disalin utuh, dapat %s", first["state_data"])
+	}
+
+	// Semua request backup (baca user_states + hitung proxy_pool) memakai service key.
+	mu.Lock()
+	for _, auth := range auths {
+		if auth != "Bearer kunci-service" {
+			mu.Unlock()
+			t.Fatalf("backup harus memakai service key, dapat %q (paths %v)", auth, paths)
+		}
+	}
+	mu.Unlock()
+
+	// Rotasi: hanya 14 berkas terbaru yang tinggal, dan yang dibuang adalah 2 tertua.
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if len(names) != stateBackupKeep {
+		t.Fatalf("harus tersisa %d berkas, dapat %d (%v)", stateBackupKeep, len(names), names)
+	}
+	for _, gone := range []string{"user_states-2026-01-01.json", "user_states-2026-01-02.json"} {
+		if _, err := os.Stat(filepath.Join(backupDir, gone)); !os.IsNotExist(err) {
+			t.Fatalf("berkas tertua %q harus dihapus, err=%v", gone, err)
+		}
+	}
+	if len(result.Removed) != 2 {
+		t.Fatalf("balasan harus menyebut 2 berkas terhapus, dapat %v", result.Removed)
+	}
+}
+
+// Tanpa service key backup tidak jalan sama sekali (tabel user_states sudah dicabut dari anon),
+// dan balasannya 503 dengan sebab yang jelas — bukan berkas kosong yang tampak sukses.
+func TestStateBackupWithoutServiceKeyIs503(t *testing.T) {
+	requests := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	dir := t.TempDir()
+	cfg := settings.Default()
+	cfg.SupabaseURL = ts.URL
+	cfg.SupabaseKey = "kunci-anon"
+	srv := &Server{settings: &cfg, dataDir: dir}
+
+	rec := httptest.NewRecorder()
+	srv.handleStateBackup(rec, httptest.NewRequest(http.MethodPost, "/api/state-backup", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("tanpa service key harus 503, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "supabase_service_key") {
+		t.Fatalf("pesan 503 harus menyebut supabase_service_key, dapat %s", rec.Body.String())
+	}
+	if requests != 0 {
+		t.Fatalf("tanpa service key tidak boleh ada request ke Supabase, dapat %d", requests)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "backups")); !os.IsNotExist(err) {
+		t.Fatalf("folder backup tidak boleh dibuat saat gagal, err=%v", err)
+	}
+}
+
+// Hanya POST yang dilayani: endpoint ini menulis berkas di host scanner.
+func TestStateBackupRejectsNonPost(t *testing.T) {
+	cfg := settings.Default()
+	srv := &Server{settings: &cfg, dataDir: t.TempDir()}
+	rec := httptest.NewRecorder()
+	srv.handleStateBackup(rec, httptest.NewRequest(http.MethodGet, "/api/state-backup", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET harus 405, dapat %d", rec.Code)
+	}
+}
+
+// Rute backup tidak boleh publik: tanpa sesi/token gate menjawab 401, dan dengan
+// X-Api-Token yang benar request diteruskan ke handler (yang lalu menjawab 503 karena service
+// key kosong — bukan 401).
+func TestStateBackupRequiresSessionOrToken(t *testing.T) {
+	cfg := settings.Default()
+	cfg.Token = "token-uji"
+	srv := &Server{settings: &cfg, sessions: auth.New(), dataDir: t.TempDir()}
+	handler := srv.Handler()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/state-backup", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("tanpa sesi/token harus 401, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/state-backup", nil)
+	req.Header.Set("X-Api-Token", "token-uji")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code == http.StatusUnauthorized {
+		t.Fatalf("token API yang benar harus lolos gate, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("tanpa service key handler harus menjawab 503, dapat %d: %s", rec.Code, rec.Body.String())
 	}
 }

@@ -25,6 +25,7 @@ Aturan akses:
 | `GET /login`, `POST /api/login` | publik |
 | `GET /api/health` | publik (monitoring) |
 | `POST /api/pool-purge` | publik, tetapi wajib `{username, hash}` sesi panel dengan role `admin` (lihat bagian *Purge `proxy_pool`*) |
+| `POST /api/state-backup` | sesi atau token API seperti rute `/api/*` lain (endpoint ini menulis berkas backup di host scanner) |
 | rute lain | cookie sesi **atau** token API (kalau token diatur) |
 
 Tanpa sesi/token, `/api/*` menjawab `401`, sedangkan halaman HTML dialihkan (`302`) ke `/login`.
@@ -60,7 +61,7 @@ PS_BIND_LAN=true      # true = 0.0.0.0 (LAN bisa akses), false = 127.0.0.1 saja
 PS_HOST=0.0.0.0
 PS_PORT=8787
 # PS_ADDR=0.0.0.0:8787   # alamat lengkap, menang atas PS_HOST/PS_PORT/PS_BIND_LAN
-PS_DB=proxies.db
+PS_DB=proxies.db       # folder berkas ini juga jadi induk folder backup: <folder>/backups
 PS_ADMIN_USER=admin
 PS_ADMIN_PASSWORD=admin
 # PS_API_TOKEN=token-klien-mesin
@@ -84,18 +85,76 @@ Isi dulu **URL**, **key**, dan **tabel** di menu **Supabase** (atau lewat `POST 
 |---|---|
 | `GET /api/supabase/status` | konfigurasi, jumlah baris Supabase terakhir yang diketahui, catatan sinkron terakhir. Tambah `?test=1` untuk benar-benar mengecek ke Supabase (lebih lambat) |
 | `POST /api/supabase/test` | uji koneksi: `{ "ok": true, "table": "proxy_pool", "total": 2732, "alive": 413 }` |
-| `POST /api/supabase/push?limit=500` | kirim proxy **hidup & segar** dari database lokal ke Supabase (upsert by `ip,port`); kolom yang ditulis: `ip`, `port`, `country`, `org`, `is_active`, `ping`, `last_checked`, bukti `tls_ok`/`alt_ok`/`exit_ip`, dan bukti vantage host `tunnel_host_ok`/`tunnel_host_ms`/`tunnel_host_checked`. `org` hanya diisi kalau barisnya pernah terbaca dari tabel Supabase (scanner tidak menebak penyedia). Kolom bukti yang belum ada di tabel dilepas otomatis (hanya untuk error kolom: HTTP 400 `PGRST204`/`42703`), jadi push tidak gagal di project yang SQL-nya belum dijalankan |
-| `POST /api/supabase/pull-verify?limit=50&jobs=100` | tarik baris dari Supabase (yang paling lama tidak dicek), verifikasi satu per satu di sini, lalu tulis balik `is_active`/`ping`/`last_checked` — baris yang mati langsung ditandai. Kolom `org` yang dibaca dari tabel disimpan di database lokal (hanya untuk baris yang sudah dikenal) sebagai bahan `push_org_cap` |
+| `POST /api/supabase/push?limit=500` | kirim proxy **hidup & segar** dari database lokal ke Supabase (upsert by `ip,port`) memakai **service key** bila terisi (kalau kosong: anon + catatan); kolom yang ditulis: `ip`, `port`, `country`, `org`, `is_active`, `ping`, `last_checked`, bukti `tls_ok`/`alt_ok`/`exit_ip`, dan bukti vantage host `tunnel_host_ok`/`tunnel_host_ms`/`tunnel_host_checked`. `org` hanya diisi kalau barisnya pernah terbaca dari tabel Supabase (scanner tidak menebak penyedia). Kolom bukti yang belum ada di tabel dilepas otomatis (hanya untuk error kolom: HTTP 400 `PGRST204`/`42703`), jadi push tidak gagal di project yang SQL-nya belum dijalankan |
+| `POST /api/supabase/pull-verify?limit=50&jobs=100` | tarik baris dari Supabase dengan anon key (yang paling lama tidak dicek), verifikasi satu per satu di sini, lalu tulis balik `is_active`/`ping`/`last_checked` dengan **service key** bila terisi — baris yang mati langsung ditandai. Kolom `org` yang dibaca dari tabel disimpan di database lokal (hanya untuk baris yang sudah dikenal) sebagai bahan `push_org_cap` |
 | `POST /api/supabase/prune?days=7&limit=2000` | hapus baris **mati** yang terakhir dicek lebih dari N hari. Balasan `{ "deleted": N, "kandidat_sebelumnya": M }` |
+| `POST /api/state-backup` | tulis salinan `user_states` + ringkasan `proxy_pool` ke berkas di host scanner (butuh `supabase_service_key`). Detail di bawah |
 | `POST /api/pool-purge` | hapus **semua** baris mati (`is_active = false`) atas permintaan panel CFVPN Hub (whoami + role `admin`, DELETE memakai `supabase_service_key`). Detail di bawah |
 
-**Catatan `prune`:** DELETE ke `proxy_pool` butuh **`supabase_service_key`** (service_role key),
+**Key mana untuk apa:** semua operasi **baca** (`pull`, `select`, hitung baris, RPC `whoami`)
+memakai **`supabase_key` (anon)**; semua operasi **tulis** — upsert `push`, `MarkDead`/
+`UpdateVerdict` di `pull-verify`, `prune`, RPC retensi `deploy_log_trim`, dan `backup state` —
+memakai **`supabase_service_key`** kalau terisi. Panel sudah mencabut hak tulis anon pada
+`proxy_pool` (`sql/2026-11-15-pool-write-lockdown.sql`), jadi tanpa key itu tulis memakai anon
+dan Supabase akan menolaknya; scanner mencatat keadaan itu sekali di log dan menuliskannya lagi
+di ringkasan sinkron (`GET /api/supabase/status` → `last_sync.note`) serta di `write_note`.
+
+**Catatan `prune`:** DELETE ke `proxy_pool` **wajib** `supabase_service_key` (service_role key),
 karena panel tidak lagi memberi anon izin hapus. Tanpa key itu `prune` tidak menembak Supabase
 sama sekali dan menjawab `200` dengan `deleted: 0` + `note` bahwa prune butuh
-`supabase_service_key` (bukan error 5xx); `push`/`pull-verify` tetap memakai `supabase_key`
-seperti biasa. Di sisi panel, jalankan migrasi `sql/2026-11-15-pool-prune-service-key.sql`
-(policy DELETE untuk `service_role`); kalau `deleted` tetap 0 padahal ada kandidat, key itu
-kemungkinan bukan service_role key.
+`supabase_service_key` (bukan error 5xx) — fallback ke anon tidak dijalankan karena request itu
+pasti ditolak (hak tulis anon sudah dicabut). Di sisi panel, migrasi
+`sql/2026-11-15-pool-prune-service-key.sql` (policy DELETE untuk `service_role`) dan
+`sql/2026-11-15-pool-write-lockdown.sql` (cabut tulis anon) sudah tersedia; kalau `deleted`
+tetap 0 padahal ada kandidat, key itu kemungkinan bukan service_role key.
+
+### Retensi `deploy_log` + backup state (langkah housekeeping pipeline harian)
+
+Dua pekerjaan tambahan dijalankan otomatis pada pipeline harian (bukan pada jadwal "cek lokal"):
+
+1. **`deploy_log_trim`** — RPC `POST <supabase_url>/rest/v1/rpc/deploy_log_trim` dengan body
+   `{"p_keep_days": 30}` dan **service key**; balasannya jumlah baris terhapus. Fungsi SQL-nya
+   di repo panel (`sql/2026-11-15-deploy-log-trim.sql`, `SECURITY DEFINER`, `EXECUTE` hanya
+   untuk `service_role`). Langkah ini **best-effort**: kegagalannya (fungsi belum dijalankan,
+   key salah, jaringan) hanya muncul sebagai `note` pada langkah
+   `housekeeping deploy_log` — pipeline tidak pernah ditandai gagal karenanya.
+2. **`backup state`** — `POST /api/state-backup` menulis salinan tabel `user_states` (dibaca
+   dengan service key, kolom `username`/`state_data`/`updated_at` saja — tidak pernah `*`, dan
+   kolom bernama sandi/hash/kunci dibuang walau ikut terkirim) ke
+   `<folder DB>/backups/user_states-YYYY-MM-DD.json` (folder DB = nilai `-db`/`PS_DB`, bawaan
+   `proxies.db`), lengkap dengan ringkasan `generated_at`, `user_states_count`, dan
+   `proxy_pool_count`. Setelah menulis, hanya **14 berkas terbaru** yang disisakan. Berkas
+   ditulis lewat berkas `.tmp` lalu di-rename, jadi backup separuh jalan tidak pernah terlihat
+   sebagai berkas jadi.
+
+Rute ini **tidak publik**: gate umum mewajibkan cookie sesi atau header `X-Api-Token`.
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/state-backup -H "X-Api-Token: <token>"
+```
+
+```json
+{
+  "path": "C:\\scanner\\backups\\user_states-2026-11-15.json",
+  "bytes": 48210,
+  "user_states": 7,
+  "proxy_pool": 2732,
+  "generated_at": "2026-11-15T05:30:12Z",
+  "kept": 14,
+  "removed": ["user_states-2026-01-01.json", "user_states-2026-01-02.json"]
+}
+```
+
+| Status | Balasan | Arti |
+|---|---|---|
+| `200` | ringkasan di atas | berkas ditulis (dan rotasi dijalankan) |
+| `405` | `{ "error": "pakai POST" }` | metode bukan POST |
+| `502` | `{ "error": "..." }` | baca `user_states`/hitung `proxy_pool`/menulis berkas gagal |
+| `503` | `{ "error": "..." }` | `supabase_service_key` belum diset (tabel `user_states` tidak bisa dibaca anon) |
+
+`GET /api/supabase/status` juga melaporkan `write_key` (`service_key`/`anon_key`) dan
+`write_note` (kosong kalau service key terisi), supaya key yang dipakai operasi tulis bisa
+diperiksa tanpa menjalankan sinkronisasi.
 
 ### Purge `proxy_pool` (dipakai panel CFVPN Hub)
 
@@ -181,8 +240,8 @@ Supaya berjalan sendiri tanpa perintah manual, aktifkan di **Scheduler → Supab
 | Field | Arti |
 |---|---|
 | `supabase_url` | URL project (mis. `https://xxxx.supabase.co`) |
-| `supabase_key` | anon key untuk push/pull/select (tidak pernah dikirim balik ke klien; hanya `supabase_key_set: true`) |
-| `supabase_service_key` | service_role key, **hanya** untuk operasi hapus (`prune`); tidak pernah dikirim balik ke klien (hanya `supabase_service_key_set: true`), dan tanpa key ini prune menjawab `deleted: 0` + `note` |
+| `supabase_key` | anon key untuk semua operasi **baca** (pull, select, hitung baris, RPC `whoami`); tidak pernah dikirim balik ke klien (hanya `supabase_key_set: true`) |
+| `supabase_service_key` | service_role key untuk **semua operasi tulis** (`push`, `MarkDead`/`UpdateVerdict`, `prune`, RPC `deploy_log_trim`, `state-backup`) dan untuk membaca `user_states`; dipakai kalau terisi, kalau kosong tulis jatuh ke anon + catatan. Tidak pernah dikirim balik ke klien (hanya `supabase_service_key_set: true`); tanpa key ini prune menjawab `deleted: 0` + `note`, dan `POST /api/state-backup` menjawab `503` |
 | `supabase_table` | nama tabel, default `proxy_pool` |
 | `supabase_auto_push` | `true` = setiap siklus selesai, proxy hidup otomatis dikirim ke Supabase |
 | `supabase_pull_limit` | jumlah baris Supabase yang ditarik & diverifikasi tiap siklus (`0` = tidak) |
@@ -204,12 +263,23 @@ jadi aman diulang dan tidak menggandakan baris.
 
 ## Pipeline harian
 
-Satu pipeline = empat pekerjaan berurutan:
+Pipeline penuh (harian) berjalan berurutan:
 
 1. **tarik dari Supabase** baris yang paling lama tidak dicek
 2. **uji satu per satu** di sini (handshake nyata) lalu tulis verdict kembali ke Supabase
 3. **scrape semua sumber** → verifikasi → simpan ke database lokal
 4. **push** proxy hidup & segar ke Supabase (harian: menyeluruh; jadwal 6 jam: hanya yang berubah)
+5. **prune** baris mati lama (butuh service key)
+6. **housekeeping `deploy_log`** — RPC `deploy_log_trim(p_keep_days=30)`, best-effort (kegagalan
+   hanya jadi `note` langkah, bukan kegagalan pipeline)
+7. **backup state** — salinan `user_states` + ringkasan `proxy_pool` ke `<folder DB>/backups`
+   (rotasi 14 berkas)
+8. **housekeeping database lokal** — buang kandidat gagal berulang
+
+Jadwal "cek lokal" (bawaan tiap 6 jam) tidak menjalankan langkah 1, 5, 6, dan 7; langkahnya
+muncul di status dengan catatan `dilewati`. Kegagalan langkah 6 tidak pernah mengisi
+`pipeline.error`, sedangkan kegagalan langkah 7 **dianggap gagal** (backup adalah jaring
+pengaman data pengguna, jadi tidak boleh lewat diam-diam).
 
 | Endpoint | Kegunaan |
 |---|---|
@@ -232,7 +302,10 @@ Contoh balasan `GET /api/pipeline`:
     "steps": [
       { "name": "tarik & verifikasi Supabase", "ok": true, "note": "30 baris diuji, 0 masih hidup", "counts": { "dicek": 30, "hidup": 0, "mati": 30, "error": 0 }, "ms": 10727 },
       { "name": "scrape sumber & verifikasi", "ok": true, "note": "220 kandidat diperiksa, 14 hidup", "counts": { "kandidat": 200, "dicek": 220, "hidup": 14, "mati": 206 }, "ms": 30004 },
-      { "name": "push ke Supabase", "ok": true, "note": "97 proxy dikirim", "counts": { "dikirim": 97 }, "ms": 587 }
+      { "name": "push ke Supabase", "ok": true, "note": "97 proxy dikirim", "counts": { "dikirim": 97 }, "ms": 587 },
+      { "name": "prune baris mati Supabase", "ok": true, "note": "12 baris mati (> 7 hari) dihapus", "counts": { "dihapus": 12, "hari": 7 }, "ms": 2204 },
+      { "name": "housekeeping deploy_log", "ok": true, "note": "31 baris riwayat deploy (> 30 hari) dihapus", "counts": { "dihapus": 31, "hari": 30 }, "ms": 410 },
+      { "name": "backup state user_states", "ok": true, "note": "7 baris user_states + 2732 baris proxy_pool → /srv/scanner/backups/user_states-2026-11-15.json (48210 B, 14 berkas disimpan)", "counts": { "user_states": 7, "proxy_pool": 2732, "disimpan": 14, "dihapus": 0 }, "ms": 880 }
     ]
   },
   "config": {
@@ -257,7 +330,8 @@ Field pengaturan terkait:
 
 Catatan penulisan verdict: hasil verifikasi dikirim **per batch** — baris yang hidup lewat
 satu upsert (kolom `ping` berbeda per baris), baris yang mati lewat satu `PATCH id=in.(...)`
-per 200 id. Jadi menguji 500 baris ≈ 3-4 request, bukan 500.
+per 200 id. Jadi menguji 500 baris ≈ 3-4 request, bukan 500. Kedua jalur itu operasi **tulis**,
+jadi memakai `supabase_service_key` bila terisi (barisnya ditarik dengan anon key).
 
 ---
 

@@ -13,6 +13,9 @@ import (
 	"net"
 	"net/http"
 	neturl "net/url"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,6 +70,13 @@ type Server struct {
 	// memverifikasi hash lewat RPC whoami, jadi tanpa pagar ia menjadi oracle hash tanpa batas.
 	purgeMu   sync.Mutex
 	purgeHits map[string]purgeHit
+
+	// dataDir adalah folder data scanner (folder berkas DB SQLite); backup state ditulis ke
+	// <dataDir>/backups. Kosong berarti folder kerja proses.
+	dataDir string
+	// writeKeyOnce memastikan catatan "operasi tulis jatuh ke anon key" hanya masuk log sekali
+	// per proses — catatan yang sama muncul lagi di ringkasan sinkron tiap operasi tulis.
+	writeKeyOnce sync.Once
 }
 
 // New membuat server. `cfgPath` adalah lokasi settings.json (dipakai saat menyimpan).
@@ -76,6 +86,10 @@ func New(st *store.Store, runner *scraper.Runner, sched *scraper.Scheduler, cfg 
 
 // SetEnvPath mencatat berkas .env yang dibaca saat startup (ditampilkan di halaman Tunnel).
 func (s *Server) SetEnvPath(path string) { s.envPath = path }
+
+// SetDataDir mencatat folder data scanner (folder berkas DB SQLite). Backup state ditulis ke
+// <dir>/backups; tanpa ini berkasnya jatuh ke folder kerja proses.
+func (s *Server) SetDataDir(dir string) { s.dataDir = dir }
 
 // Handler mengembalikan router lengkap.
 func (s *Server) Handler() http.Handler {
@@ -107,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/supabase/push", s.handleSupabasePush)
 	mux.HandleFunc("/api/supabase/pull-verify", s.handleSupabasePullVerify)
 	mux.HandleFunc("/api/supabase/prune", s.handleSupabasePrune)
+	mux.HandleFunc("/api/state-backup", s.handleStateBackup)
 	mux.HandleFunc("/api/pool-purge", s.handlePoolPurge)
 	mux.HandleFunc("/api/vless/clash", s.handleClash)
 	mux.HandleFunc("/api/vless/raw", s.handleRaw)
@@ -226,18 +241,73 @@ func (s *Server) supabaseClient() *supabase.Client {
 	return supabase.New(cfg.SupabaseURL, cfg.SupabaseKey, cfg.SupabaseTable)
 }
 
-// supabaseDeleteClient membuat klien dengan `supabase_service_key` — hanya untuk operasi
-// hapus. Panel CFVPN tidak lagi memberi anon izin DELETE pada proxy_pool, jadi prune wajib
-// memakai service key. Push/pull tetap memakai `supabase_key` supaya kunci istimewa itu
-// tidak dipakai untuk operasi yang tidak perlu.
-func (s *Server) supabaseDeleteClient() *supabase.Client {
+// writeAnonNote adalah catatan tunggal saat `supabase_service_key` kosong: operasi tulis
+// jatuh ke anon key, yang setelah cfvpn-hub/sql/2026-11-15-pool-write-lockdown.sql tidak lagi
+// punya hak tulis pada proxy_pool (Supabase akan menolaknya). Baca tetap lewat anon seperti biasa.
+const writeAnonNote = "supabase_service_key belum diset: operasi tulis jatuh ke anon key, sementara anon sudah tidak punya hak tulis di proxy_pool"
+
+// supabaseClients membungkus pilihan klien Supabase untuk jalur sinkronisasi: baca selalu
+// memakai anon key (pool memang boleh dibaca anon), tulis memakai `supabase_service_key` bila
+// terisi. Struktur ini dipakai supaya tidak ada jalur tulis yang diam-diam memakai anon.
+type supabaseClients struct {
+	read  *supabase.Client
+	write *supabase.Client
+	// note berisi catatan pemilihan key saat tulis jatuh ke anon (kosong kalau service key
+	// terisi); nilainya ikut ke ringkasan sinkron dan balasan endpoint.
+	note string
+}
+
+// supabaseClients merakit klien baca + tulis dari pengaturan saat ini. Catatan fallback ditulis
+// ke log hanya sekali per proses supaya log tidak banjir saat pipeline memanggil berkali-kali.
+func (s *Server) supabaseClients() supabaseClients {
+	cfg := s.currentSettings()
+	write, usedService := supabase.NewForWrite(cfg.SupabaseURL, cfg.SupabaseKey, cfg.SupabaseServiceKey, cfg.SupabaseTable)
+	out := supabaseClients{
+		read:  supabase.New(cfg.SupabaseURL, cfg.SupabaseKey, cfg.SupabaseTable),
+		write: write,
+	}
+	// Catatan fallback hanya berguna kalau Supabase memang dikonfigurasi: tanpa URL/anon key
+	// tidak ada request yang dikirim, jadi jangan menakuti log dengan peringatan key kosong.
+	if !usedService && out.read.Configured() {
+		out.note = writeAnonNote
+		s.writeKeyOnce.Do(func() { log.Printf("supabase: %s", writeAnonNote) })
+	}
+	return out
+}
+
+// writeKeySummary melaporkan key yang dipakai operasi tulis + catatannya (dipakai endpoint
+// status supaya pemilihan key bisa diperiksa tanpa memicu operasi tulis).
+func writeKeySummary(cfg settings.Settings) (key, note string) {
+	if strings.TrimSpace(cfg.SupabaseServiceKey) != "" {
+		return "service_key", ""
+	}
+	return "anon_key", writeAnonNote
+}
+
+// appendNote menambahkan catatan key ke sebuah catatan langkah/ringkasan (no-op kalau kosong).
+func appendNote(note, extra string) string {
+	if extra == "" {
+		return note
+	}
+	if note == "" {
+		return extra
+	}
+	return note + "; " + extra
+}
+
+// supabaseServiceClient membuat klien dengan `supabase_service_key` untuk operasi yang memang
+// butuh kunci istimewa (hapus baris mati, RPC retensi deploy_log, backup `user_states`) —
+// kuncinya tidak pernah dikirim ke klien dan tidak pernah dipakai untuk operasi yang bisa anon.
+func (s *Server) supabaseServiceClient() *supabase.Client {
 	cfg := s.currentSettings()
 	return supabase.New(cfg.SupabaseURL, cfg.SupabaseServiceKey, cfg.SupabaseTable)
 }
 
 // pruneNoServiceKeyNote adalah pesan tunggal untuk semua jalur prune saat service key kosong:
-// bukan kegagalan, hanya tidak ada yang bisa dihapus dengan anon key.
-const pruneNoServiceKeyNote = "prune butuh supabase_service_key (service_role key) — tanpa key itu Supabase menolak DELETE ke proxy_pool; push/pull-verify tetap memakai supabase_key"
+// bukan kegagalan, hanya tidak ada yang bisa dihapus dengan anon key. (Operasi tulis lain —
+// push/MarkDead/UpdateVerdict — tetap jalan dengan anon + catatan; DELETE tidak, karena anon
+// sudah dicabut hak hapus pada proxy_pool.)
+const pruneNoServiceKeyNote = "prune butuh supabase_service_key (service_role key) — tanpa key itu Supabase menolak DELETE ke proxy_pool; operasi tulis lain mengambil jalur anon dengan catatan di ringkasan sinkron"
 
 // handleSupabaseStatus melaporkan konfigurasi + hasil sinkron terakhir. Panggilan cek
 // ke Supabase hanya dilakukan kalau diminta (?test=1) supaya endpoint ini selalu cepat —
@@ -245,6 +315,7 @@ const pruneNoServiceKeyNote = "prune butuh supabase_service_key (service_role ke
 func (s *Server) handleSupabaseStatus(w http.ResponseWriter, r *http.Request) {
 	cfg := s.currentSettings()
 	client := s.supabaseClient()
+	writeKey, writeNote := writeKeySummary(cfg)
 	s.stateMu.Lock()
 	status := s.lastSync
 	s.stateMu.Unlock()
@@ -254,6 +325,8 @@ func (s *Server) handleSupabaseStatus(w http.ResponseWriter, r *http.Request) {
 		"table":                cfg.SupabaseTable,
 		"has_key":              cfg.SupabaseKey != "",
 		"has_service_key":      cfg.SupabaseServiceKey != "",
+		"write_key":            writeKey,
+		"write_note":           writeNote,
 		"auto_push":            cfg.SupabaseAutoPush,
 		"pull_limit":           cfg.SupabasePullLimit,
 		"push_org_cap":         cfg.PushOrgCap,
@@ -312,8 +385,8 @@ func (s *Server) handleSupabasePush(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "pakai POST"})
 		return
 	}
-	client := s.supabaseClient()
-	if !client.Configured() {
+	clients := s.supabaseClients()
+	if !clients.read.Configured() {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "isi URL dan key Supabase dulu (menu Supabase)"})
 		return
 	}
@@ -327,16 +400,20 @@ func (s *Server) handleSupabasePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.syncRun.Unlock()
-	edgeDead, edgeErr := client.PullEdgeVerdicts(r.Context(), 5000)
+	edgeDead, edgeErr := clients.read.PullEdgeVerdicts(r.Context(), 5000)
 	if edgeErr != nil {
 		edgeDead = nil // tabel tanpa kolom tunnel_ok: lanjut tanpa filter edge
 	}
-	pushed, skippedEdge, err := s.pushToSupabase(r.Context(), client, cfg, limit, edgeDead, time.Time{})
+	pushed, skippedEdge, err := s.pushToSupabase(r.Context(), clients, cfg, limit, edgeDead, time.Time{})
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"pushed": pushed, "held_edge_dead": skippedEdge, "table": client.Table})
+	payload := map[string]any{"pushed": pushed, "held_edge_dead": skippedEdge, "table": clients.write.Table}
+	if clients.note != "" {
+		payload["note"] = clients.note
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // handleSupabasePrune menghapus baris mati lama di Supabase (housekeeping).
@@ -365,8 +442,13 @@ func (s *Server) handleSupabasePrune(w http.ResponseWriter, r *http.Request) {
 
 	// Tanpa service key tidak ada gunanya menembak Supabase: jawab jelas (bukan 5xx)
 	// bahwa prune butuh `supabase_service_key`, dan jangan kirim request apa pun.
-	deleteClient := s.supabaseDeleteClient()
+	// (anon sudah tidak punya hak DELETE sejak sql/2026-11-15-pool-write-lockdown.sql, jadi
+	// fallback anon di sini hanya akan jadi request sia-sia yang pasti ditolak.)
+	deleteClient := s.supabaseServiceClient()
 	if !deleteClient.Configured() {
+		// Ringkasan sinkron ikut menyebut kenapa tidak ada yang dihapus, supaya catatan key
+		// yang dipakai operasi tulis bisa ditelusuri dari GET /api/supabase/status.
+		s.recordSync("prune dilewati: "+pruneNoServiceKeyNote, nil)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"deleted": 0, "older_than_days": days, "kandidat_sebelumnya": 0,
 			"note": pruneNoServiceKeyNote,
@@ -399,8 +481,8 @@ func (s *Server) handleSupabasePullVerify(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "pakai POST"})
 		return
 	}
-	client := s.supabaseClient()
-	if !client.Configured() {
+	clients := s.supabaseClients()
+	if !clients.read.Configured() {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "isi URL dan key Supabase dulu (menu Supabase)"})
 		return
 	}
@@ -418,16 +500,17 @@ func (s *Server) handleSupabasePullVerify(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer s.syncRun.Unlock()
-	summary, err := s.pullVerify(r.Context(), client, opts, limit)
+	summary, err := s.pullVerify(r.Context(), clients, opts, limit)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
+	// Bentuk balasan dipertahankan (ringkasan apa adanya) supaya klien panel yang sudah ada
+	// tidak perlu berubah; pemilihan key tercatat di ringkasan sinkron + log.
 	writeJSON(w, http.StatusOK, summary)
 }
 
 // ---------------------------------------------------------------- purge proxy_pool (panel CFVPN Hub)
-
 // poolPurgeRateLimit / poolPurgeRateWindow membatasi percobaan POST /api/pool-purge per IP.
 // Verifikasi hash di endpoint ini memanggil RPC whoami, jadi tanpa pagar ia menjadi oracle
 // hash tanpa batas. Limiter in-memory per proses cukup karena scanner hanya satu instance.
@@ -747,7 +830,10 @@ func hostCheckedAt(unixSec int64) time.Time {
 // dinaikkan lagi, walau verifikasi lokal menganggapnya hidup.
 // since membatasi push ke baris yang dicek setelah waktu itu (push delta). Zero = semua baris
 // segar (dipakai pipeline harian supaya Supabase ikut disegarkan menyeluruh).
-func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cfg settings.Settings, limit int, edgeDead map[string]bool, since time.Time) (int, int, error) {
+//
+// `clients.write` (service key bila terisi) yang membawa upsert; `clients.read` tetap anon.
+func (s *Server) pushToSupabase(ctx context.Context, clients supabaseClients, cfg settings.Settings, limit int, edgeDead map[string]bool, since time.Time) (int, int, error) {
+	client := clients.write
 	alive := true
 	fresh := pushFreshMinutes(cfg)
 	promote, err := s.store.List(store.Filter{Alive: &alive, Limit: limit, Order: "score", FreshMinutes: fresh, TLSOnly: cfg.PushRequireTLS, Since: since})
@@ -884,7 +970,7 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 	} else {
 		note += ", kolom bukti vantage host belum ada di tabel → jalankan docs/supabase-policies.sql"
 	}
-	s.recordSync(note+")", err)
+	s.recordSync(appendNote(note+")", clients.note), err)
 	if err == nil {
 		// Penanda push terakhir: push berikutnya (jadwal 6 jam / auto-push) hanya mengirim
 		// baris yang berubah sejak titik ini.
@@ -894,7 +980,7 @@ func (s *Server) pushToSupabase(ctx context.Context, client *supabase.Client, cf
 }
 
 // pruneSupabase menghapus baris mati lama di Supabase (housekeeping). `client` harus klien
-// dengan service key (lihat supabaseDeleteClient): anon key tidak lagi boleh DELETE.
+// dengan service key (lihat supabaseServiceClient): anon key tidak lagi boleh DELETE.
 func (s *Server) pruneSupabase(ctx context.Context, client *supabase.Client, days, limit int) (int, error) {
 	if days <= 0 {
 		return 0, nil
@@ -908,6 +994,235 @@ func (s *Server) pruneSupabase(ctx context.Context, client *supabase.Client, day
 	}
 	s.recordSync(fmt.Sprintf("prune %d baris mati (> %d hari)", deleted, days), err)
 	return deleted, err
+}
+
+// ---------------------------------------------------------- housekeeping Supabase (retensi + backup)
+
+// trimNoServiceKeyNote menjelaskan kenapa retensi riwayat deploy dilewati: RPC `deploy_log_trim`
+// hanya diberi EXECUTE ke service_role (cfvpn-hub/sql/2026-11-15-deploy-log-trim.sql).
+const trimNoServiceKeyNote = "dilewati: RPC deploy_log_trim hanya bisa dipanggil dengan supabase_service_key"
+
+// trimDeployLogStep memanggil RPC `deploy_log_trim(p_keep_days)` dan SELALU mengembalikan langkah
+// yang tidak menggagalkan pipeline: `deploy_log` hanya tabel audit panel, jadi kegagalan (fungsi
+// belum dijalankan, key salah, jaringan) cukup dicatat di `Note`.
+func (s *Server) trimDeployLogStep(ctx context.Context, testOnly bool) PipelineStep {
+	if testOnly {
+		return PipelineStep{Name: "housekeeping deploy_log", OK: true, Note: "dilewati (bukan pipeline penuh)"}
+	}
+	client := s.supabaseServiceClient()
+	if !client.Configured() {
+		return PipelineStep{Name: "housekeeping deploy_log", OK: true, Note: trimNoServiceKeyNote}
+	}
+	started := time.Now()
+	step := PipelineStep{Name: "housekeeping deploy_log", OK: true}
+	deleted, err := client.TrimDeployLog(ctx, supabase.DeployLogKeepDays)
+	if err != nil {
+		step.Note = fmt.Sprintf("gagal (best-effort, pipeline lanjut): %v", err)
+	} else {
+		step.Note = fmt.Sprintf("%d baris riwayat deploy (> %d hari) dihapus", deleted, supabase.DeployLogKeepDays)
+		step.Counts = map[string]int{"dihapus": deleted, "hari": supabase.DeployLogKeepDays}
+	}
+	step.MS = time.Since(started).Milliseconds()
+	return step
+}
+
+// stateBackupKeep adalah jumlah berkas backup state yang disimpan (14 hari terakhir).
+const stateBackupKeep = 14
+
+// stateBackupRowLimit membatasi baris user_states yang disalin sekali jalan. Backup yang
+// terpotong ditandai di berkas dan di langkah pipeline supaya tidak terlihat lengkap.
+const stateBackupRowLimit = 5000
+
+// errStateBackupNoServiceKey menandai backup tidak bisa berjalan tanpa service key: tabel
+// `user_states` sudah dicabut dari anon (cfvpn-hub/sql/2026-11-14-state-hardening.sql).
+var errStateBackupNoServiceKey = errors.New("backup state butuh supabase_service_key (service_role key): tabel user_states tidak bisa dibaca dengan anon key")
+
+// stateBackupFile adalah bentuk berkas backup: ringkasan + salinan baris `user_states`.
+type stateBackupFile struct {
+	GeneratedAt     string               `json:"generated_at"`
+	UserStatesCount int                  `json:"user_states_count"`
+	ProxyPoolCount  int                  `json:"proxy_pool_count"`
+	Truncated       bool                 `json:"truncated"`
+	UserStates      []supabase.UserState `json:"user_states"`
+}
+
+// stateBackupResult adalah ringkasan hasil backup (balasan POST /api/state-backup + langkah
+// pipeline).
+type stateBackupResult struct {
+	Path        string   `json:"path"`
+	Bytes       int64    `json:"bytes"`
+	UserStates  int      `json:"user_states"`
+	ProxyPool   int      `json:"proxy_pool"`
+	GeneratedAt string   `json:"generated_at"`
+	Kept        int      `json:"kept"`
+	Removed     []string `json:"removed,omitempty"`
+	Truncated   bool     `json:"truncated,omitempty"`
+}
+
+// backupDir adalah folder berkas backup: <dataDir>/backups (dataDir kosong = folder kerja proses).
+func (s *Server) backupDir() string {
+	return filepath.Join(s.dataDir, "backups")
+}
+
+// backupState menyalin `user_states` — dibaca dengan service key dan hanya kolom
+// username/state_data/updated_at, jadi tidak ada sandi/hash yang ikut (lihat
+// supabase.FetchUserStates) — ke <dataDir>/backups/user_states-YYYY-MM-DD.json, lengkap dengan
+// ringkasan (jumlah baris user_states, jumlah baris proxy_pool, waktu). Setelah menulis, hanya
+// 14 berkas terbaru yang disisakan.
+func (s *Server) backupState(ctx context.Context) (stateBackupResult, error) {
+	client := s.supabaseServiceClient()
+	if !client.Configured() {
+		return stateBackupResult{}, errStateBackupNoServiceKey
+	}
+	// Satu baris lebih banyak dari batas: kalau kelebihan, berkasnya ditandai terpotong
+	// alih-alih tampak lengkap.
+	states, err := client.FetchUserStates(ctx, stateBackupRowLimit+1)
+	if err != nil {
+		return stateBackupResult{}, fmt.Errorf("baca user_states: %w", err)
+	}
+	truncated := len(states) > stateBackupRowLimit
+	if truncated {
+		states = states[:stateBackupRowLimit]
+	}
+	poolRows, err := client.CountRows(ctx)
+	if err != nil {
+		return stateBackupResult{}, fmt.Errorf("hitung proxy_pool: %w", err)
+	}
+	generatedAt := time.Now().UTC()
+	dir := s.backupDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return stateBackupResult{}, fmt.Errorf("siapkan folder backup %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, "user_states-"+generatedAt.Format("2006-01-02")+".json")
+	payload := stateBackupFile{
+		GeneratedAt:     generatedAt.Format(time.RFC3339),
+		UserStatesCount: len(states),
+		ProxyPoolCount:  poolRows,
+		Truncated:       truncated,
+		UserStates:      states,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return stateBackupResult{}, err
+	}
+	data = append(data, '\n')
+	if err := writeFileAtomic(path, data, 0o600); err != nil {
+		return stateBackupResult{}, err
+	}
+	kept, removed, rotateErr := rotateStateBackups(dir, stateBackupKeep)
+	if rotateErr != nil {
+		// Berkasnya sudah tertulis utuh; kegagalan merotasi hanya catatan (tidak ada data
+		// pengguna yang hilang), jadi backup tetap dilaporkan sukses.
+		log.Printf("rotasi backup state gagal: %v", rotateErr)
+	}
+	s.recordSync(fmt.Sprintf("backup state: %d baris user_states + %d baris proxy_pool → %s", len(states), poolRows, path), nil)
+	return stateBackupResult{
+		Path:        path,
+		Bytes:       int64(len(data)),
+		UserStates:  len(states),
+		ProxyPool:   poolRows,
+		GeneratedAt: payload.GeneratedAt,
+		Kept:        kept,
+		Removed:     removed,
+		Truncated:   truncated,
+	}, nil
+}
+
+// backupStateStep menjalankan backup state pada pipeline harian. Berbeda dari retensi deploy_log,
+// kegagalan di sini MENANDAI langkah gagal: berkas backup adalah jaring pengaman data pengguna,
+// jadi diam-diam melewatinya jauh lebih mahal daripada pipeline yang berhenti dengan pesan jelas.
+func (s *Server) backupStateStep(ctx context.Context, testOnly bool) PipelineStep {
+	if testOnly {
+		return PipelineStep{Name: "backup state user_states", OK: true, Note: "dilewati (bukan pipeline penuh)"}
+	}
+	started := time.Now()
+	step := PipelineStep{Name: "backup state user_states"}
+	result, err := s.backupState(ctx)
+	switch {
+	case err != nil:
+		step.Note = err.Error()
+	default:
+		step.OK = true
+		step.Note = fmt.Sprintf("%d baris user_states + %d baris proxy_pool → %s (%d B, %d berkas disimpan)",
+			result.UserStates, result.ProxyPool, result.Path, result.Bytes, result.Kept)
+		if result.Truncated {
+			step.Note += fmt.Sprintf("; DIPOTONG: hanya %d baris pertama yang disalin", result.UserStates)
+		}
+		if len(result.Removed) > 0 {
+			step.Note += fmt.Sprintf("; %d berkas lama dihapus", len(result.Removed))
+		}
+		step.Counts = map[string]int{
+			"user_states": result.UserStates, "proxy_pool": result.ProxyPool,
+			"disimpan": result.Kept, "dihapus": len(result.Removed),
+		}
+	}
+	step.MS = time.Since(started).Milliseconds()
+	return step
+}
+
+// writeFileAtomic menulis berkas lewat berkas sementara di folder yang sama lalu me-rename,
+// supaya backup yang belum selesai tidak pernah terbaca sebagai berkas jadi.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return fmt.Errorf("tulis %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("pindahkan %s: %w", path, err)
+	}
+	return nil
+}
+
+// rotateStateBackups menyisakan `keep` berkas backup terbaru dan menghapus sisanya. Nama berkas
+// memuat tanggal (user_states-YYYY-MM-DD.json), jadi urutan nama = urutan waktu.
+func rotateStateBackups(dir string, keep int) (int, []string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "user_states-") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	if keep < 0 {
+		keep = 0
+	}
+	kept := min(len(names), keep)
+	removed := make([]string, 0, len(names)-kept)
+	for _, name := range names[kept:] {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			return kept, removed, err
+		}
+		removed = append(removed, name)
+	}
+	return kept, removed, nil
+}
+
+// handleStateBackup menulis salinan `user_states` sekarang (tombol manual / klien mesin).
+// Rute ini TIDAK publik: gate umum sudah mewajibkan cookie sesi atau header X-Api-Token.
+func (s *Server) handleStateBackup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "pakai POST"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+	result, err := s.backupState(ctx)
+	if err != nil {
+		status := http.StatusBadGateway
+		if errors.Is(err, errStateBackupNoServiceKey) {
+			status = http.StatusServiceUnavailable
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // supabaseSink menjembatani scraper.RemoteSink ke klien Supabase (menjaga scraper tetap
@@ -985,8 +1300,11 @@ func remoteOrgs(rows []supabase.Row) []store.OrgRef {
 	return refs
 }
 
-// pullVerify menarik baris dari Supabase dan memverifikasinya di sini.
-func (s *Server) pullVerify(ctx context.Context, client *supabase.Client, opts scraper.Options, limit int) (scraper.Summary, error) {
+// pullVerify menarik baris dari Supabase dan memverifikasinya di sini. Barisnya ditarik dengan
+// klien anon (`clients.read`), sedangkan verdictnya ditulis dengan `clients.write` (service key
+// bila terisi) — anon sudah tidak punya hak tulis pada proxy_pool.
+func (s *Server) pullVerify(ctx context.Context, clients supabaseClients, opts scraper.Options, limit int) (scraper.Summary, error) {
+	client := clients.read
 	cfg := s.currentSettings()
 	// Ambil yang paling lama tidak dicek (atau belum pernah) supaya tidak mengulang baris baru.
 	staleBefore := time.Now().Add(-cfg.RefreshAfter()).Unix()
@@ -1009,7 +1327,9 @@ func (s *Server) pullVerify(ctx context.Context, client *supabase.Client, opts s
 	for _, row := range rows {
 		remote = append(remote, scraper.RemoteRow{ID: row.ID, IP: row.IP, Port: row.Port, Country: row.Country})
 	}
-	summary, err := scraper.VerifyRemote(ctx, s.store, supabaseSink{client: client, requireTLS: s.currentSettings().PushRequireTLS}, remote, opts, s.runner)
+	// Verdict ditulis lewat klien tulis (service key bila terisi): MarkDead/UpdateVerdict
+	// adalah operasi tulis pada proxy_pool.
+	summary, err := scraper.VerifyRemote(ctx, s.store, supabaseSink{client: clients.write, requireTLS: s.currentSettings().PushRequireTLS}, remote, opts, s.runner)
 	// org (penyedia/ASN) yang dibaca dari tabel Supabase disimpan di database lokal supaya
 	// push bisa membatasi berapa baris per penyedia (`push_org_cap`); scanner tidak menebak
 	// nilai ini sendiri. Dijalankan SETELAH verifikasi supaya baris yang baru masuk batch ini
@@ -1025,7 +1345,7 @@ func (s *Server) pullVerify(ctx context.Context, client *supabase.Client, opts s
 			s.setLastRemote(total, alive)
 		}
 	}
-	s.recordSync(fmt.Sprintf("verifikasi %d baris Supabase (hidup %d, mati %d)", summary.Checked, summary.Alive, summary.Dead), err)
+	s.recordSync(appendNote(fmt.Sprintf("verifikasi %d baris Supabase (hidup %d, mati %d)", summary.Checked, summary.Alive, summary.Dead), clients.note), err)
 	return summary, err
 }
 
@@ -1085,6 +1405,7 @@ type PipelineStatus struct {
 //  1. tarik baris dari Supabase -> verifikasi di sini -> tulis hasilnya kembali
 //  2. scrape semua sumber -> verifikasi -> simpan ke database lokal
 //  3. push proxy hidup & segar ke Supabase
+//  4. prune baris mati, retensi riwayat deploy (deploy_log_trim), backup state user_states
 //
 // Dijalankan oleh penjadwal (mode interval/harian saat pipeline diaktifkan) atau manual
 // lewat POST /api/pipeline/run.
@@ -1094,10 +1415,11 @@ func (s *Server) RunPipeline() error {
 }
 
 // RunPipelineMode menjalankan pipeline. testOnly=true dipakai jadwal 6 jam: tidak menarik baris
-// dari Supabase, tidak mengambil sumber baru, dan tidak prune — isinya cek lokal (refresh baris
-// tersimpan + pass target negara) lalu push delta (hanya baris yang berubah sejak
-// meta.last_push_at). testOnly=false = siklus penuh: pull-verify, scrape semua sumber, push
-// menyeluruh, prune, housekeeping.
+// dari Supabase, tidak mengambil sumber baru, tidak prune, dan tidak menjalankan housekeeping
+// Supabase (retensi deploy_log + backup state) — isinya cek lokal (refresh baris tersimpan + pass
+// target negara) lalu push delta (hanya baris yang berubah sejak meta.last_push_at).
+// testOnly=false = siklus penuh: pull-verify, scrape semua sumber, push menyeluruh, prune,
+// retensi deploy_log, backup state, housekeeping lokal.
 func (s *Server) RunPipelineMode(testOnly bool) error {
 	if err := s.beginPipeline(); err != nil {
 		return err
@@ -1133,22 +1455,23 @@ func (s *Server) beginPipeline() error {
 }
 
 // runPipelineLocked menjalankan seluruh langkah pipeline. Pemanggil sudah memegang pipelineRun
-// dan fungsi ini selalu melepasnya; error yang dikembalikan mencerminkan langkah yang gagal.
+// dan fungsi ini selalu melepasnya; error yang dikembalikan mencerminkan langkah yang gagal —
+// kecuali langkah retensi deploy_log, yang memang best-effort (hanya menulis catatan).
 func (s *Server) runPipelineLocked(testOnly bool) error {
 	defer s.pipelineRun.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Hour)
 	defer cancel()
 	cfg := s.currentSettings()
-	client := s.supabaseClient()
+	clients := s.supabaseClients()
 
 	// --- langkah 1: tarik & verifikasi baris Supabase ---
 	pullLimit := cfg.PipelinePullLimit
 	if pullLimit <= 0 {
 		pullLimit = cfg.SupabasePullLimit
 	}
-	if !testOnly && client.Configured() && pullLimit > 0 {
+	if !testOnly && clients.read.Configured() && pullLimit > 0 {
 		started := time.Now()
-		summary, err := s.pullVerify(ctx, client, scraper.OptionsFromSettings(cfg), pullLimit)
+		summary, err := s.pullVerify(ctx, clients, scraper.OptionsFromSettings(cfg), pullLimit)
 		step := PipelineStep{
 			Name: "tarik & verifikasi Supabase", OK: err == nil, MS: time.Since(started).Milliseconds(),
 			Counts: map[string]int{"dicek": summary.Checked, "hidup": summary.Alive, "mati": summary.Dead, "error": summary.Errors},
@@ -1158,6 +1481,7 @@ func (s *Server) runPipelineLocked(testOnly bool) error {
 		} else {
 			step.Note = fmt.Sprintf("%d baris diuji, %d masih hidup", summary.Checked, summary.Alive)
 		}
+		step.Note = appendNote(step.Note, clients.note)
 		s.addPipelineStep(step)
 	} else {
 		s.addPipelineStep(PipelineStep{Name: "tarik & verifikasi Supabase", OK: true, Note: "dilewati (belum dikonfigurasi / limit 0)"})
@@ -1213,9 +1537,9 @@ func (s *Server) runPipelineLocked(testOnly bool) error {
 	}
 
 	// --- langkah 3: push hasil ke Supabase ---
-	if client.Configured() && cfg.PipelinePushLimit > 0 {
+	if clients.read.Configured() && cfg.PipelinePushLimit > 0 {
 		started := time.Now()
-		edgeDead, edgeErr := client.PullEdgeVerdicts(ctx, 5000)
+		edgeDead, edgeErr := clients.read.PullEdgeVerdicts(ctx, 5000)
 		if edgeErr != nil {
 			edgeDead = nil
 		}
@@ -1228,7 +1552,7 @@ func (s *Server) runPipelineLocked(testOnly bool) error {
 				}
 			}
 		}
-		pushed, skippedEdge, err := s.pushToSupabase(ctx, client, cfg, cfg.PipelinePushLimit, edgeDead, since)
+		pushed, skippedEdge, err := s.pushToSupabase(ctx, clients, cfg, cfg.PipelinePushLimit, edgeDead, since)
 		step := PipelineStep{Name: "push ke Supabase", OK: err == nil, MS: time.Since(started).Milliseconds(), Counts: map[string]int{"dikirim": pushed}}
 		if err != nil {
 			step.Note = err.Error()
@@ -1239,6 +1563,7 @@ func (s *Server) runPipelineLocked(testOnly bool) error {
 			}
 			step.Counts["ditahan_edge_mati"] = skippedEdge
 		}
+		step.Note = appendNote(step.Note, clients.note)
 		s.addPipelineStep(step)
 	} else {
 		s.addPipelineStep(PipelineStep{Name: "push ke Supabase", OK: true, Note: "dilewati (belum dikonfigurasi / limit 0)"})
@@ -1247,8 +1572,8 @@ func (s *Server) runPipelineLocked(testOnly bool) error {
 	// --- langkah 4: housekeeping baris mati di Supabase ---
 	// DELETE butuh service key (panel tidak lagi memberi anon izin hapus); tanpa key itu
 	// langkah dilewati dengan catatan jelas, bukan dianggap gagal.
-	if !testOnly && client.Configured() && cfg.SupabasePruneDays > 0 {
-		deleteClient := s.supabaseDeleteClient()
+	if !testOnly && clients.read.Configured() && cfg.SupabasePruneDays > 0 {
+		deleteClient := s.supabaseServiceClient()
 		if !deleteClient.Configured() {
 			s.addPipelineStep(PipelineStep{Name: "prune baris mati Supabase", OK: true, Note: pruneNoServiceKeyNote})
 		} else {
@@ -1266,7 +1591,15 @@ func (s *Server) runPipelineLocked(testOnly bool) error {
 		s.addPipelineStep(PipelineStep{Name: "prune baris mati Supabase", OK: true, Note: "dilewati (supabase_prune_days = 0)"})
 	}
 
-	// --- langkah 5: housekeeping database lokal ---
+	// --- langkah 5: retensi riwayat deploy (RPC deploy_log_trim) ---
+	// Best-effort: riwayat deploy hanya tabel audit panel, jadi kegagalannya dicatat di langkah
+	// ini dan pipeline tetap lanjut (langkahnya tidak pernah menandai pipeline gagal).
+	s.addPipelineStep(s.trimDeployLogStep(ctx, testOnly))
+
+	// --- langkah 6: backup state user_states ---
+	s.addPipelineStep(s.backupStateStep(ctx, testOnly))
+
+	// --- langkah 7: housekeeping database lokal ---
 	{
 		started := time.Now()
 		hopeless, err := s.store.DeleteHopeless(2, 5000)
@@ -1376,8 +1709,8 @@ func (s *Server) nextRun() string {
 // verifikasi baris lama dari Supabase, sesuai pengaturan.
 func (s *Server) AfterCycle() {
 	cfg := s.currentSettings()
-	client := s.supabaseClient()
-	if !client.Configured() {
+	clients := s.supabaseClients()
+	if !clients.read.Configured() {
 		return
 	}
 	if !cfg.SupabaseAutoPush && cfg.SupabasePullLimit <= 0 {
@@ -1391,21 +1724,21 @@ func (s *Server) AfterCycle() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
 		if cfg.SupabaseAutoPush {
-			edgeDead, _ := client.PullEdgeVerdicts(ctx, 5000)
+			edgeDead, _ := clients.read.PullEdgeVerdicts(ctx, 5000)
 			since := time.Time{}
 			if raw, metaErr := s.store.Meta("last_push_at"); metaErr == nil && raw != "" {
 				if stamp, parseErr := time.Parse(time.RFC3339, raw); parseErr == nil {
 					since = stamp
 				}
 			}
-			if pushed, heldEdge, err := s.pushToSupabase(ctx, client, cfg, 1000, edgeDead, since); err != nil {
+			if pushed, heldEdge, err := s.pushToSupabase(ctx, clients, cfg, 1000, edgeDead, since); err != nil {
 				log.Printf("supabase push gagal: %v", err)
 			} else {
 				log.Printf("supabase: %d proxy didorong (%d ditahan: edge bilang mati)", pushed, heldEdge)
 			}
 		}
 		if cfg.SupabasePullLimit > 0 {
-			summary, err := s.pullVerify(ctx, client, scraper.OptionsFromSettings(cfg), cfg.SupabasePullLimit)
+			summary, err := s.pullVerify(ctx, clients, scraper.OptionsFromSettings(cfg), cfg.SupabasePullLimit)
 			if err != nil {
 				log.Printf("supabase pull-verify gagal: %v", err)
 			} else {
