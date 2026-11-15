@@ -63,6 +63,12 @@
   .api { display:grid; gap:6px; font-size:13px; }
   .toast { position:fixed; right:20px; bottom:20px; background:var(--panel2); border:1px solid var(--accent); padding:10px 14px; border-radius:10px; opacity:0; transition:opacity .3s; z-index:20; }
   .toast.show { opacity:1; }
+  .modal { position:fixed; inset:0; background:rgba(4,10,18,.86); display:none; place-items:center; padding:20px; z-index:30; }
+  .modal.show { display:grid; }
+  .modal .card { width:100%; max-width:420px; background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:20px; box-shadow:0 20px 60px rgba(0,0,0,.5); }
+  .modal .card h2 { margin:0 0 8px; }
+  .modal .card label { margin-top:10px; }
+  .modal .msg { margin-top:12px; font-size:13px; min-height:18px; color:var(--warn); }
   .view { display:none; }
   .view.active { display:block; }
   .flag { font-size:12px; color:var(--muted); }
@@ -342,6 +348,18 @@
 </div>
 <div class="toast" id="toast"></div>
 
+<form class="modal" id="pwModal">
+  <div class="card">
+    <h2>Ganti sandi dulu</h2>
+    <div class="muted">Panel ini masih memakai sandi bawaan. Ganti sandi untuk melanjutkan — sandi baru minimal 8 karakter dan tidak boleh <code>admin</code>.</div>
+    <label>Sandi lama<input id="pwOld" type="password" autocomplete="current-password" required></label>
+    <label>Sandi baru<input id="pwNew" type="password" autocomplete="new-password" required></label>
+    <label>Ulangi sandi baru<input id="pwNew2" type="password" autocomplete="new-password" required></label>
+    <button class="primary" id="btnPwSave" type="submit">Simpan sandi</button>
+    <div class="msg" id="pwMsg"></div>
+  </div>
+</form>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const num = (id) => { const v = $(id).value.trim(); return v === "" ? "" : Number(v); };
@@ -351,10 +369,38 @@ let lastSettings = null;
 function toast(msg) { const el = $("toast"); el.textContent = msg; el.classList.add("show"); setTimeout(() => el.classList.remove("show"), 2600); }
 function token() { return localStorage.getItem("panproxyscanner-token") || ""; }
 
+// showPasswordModal menampilkan form ganti sandi di atas panel. Panel tetap ter-render di
+// belakangnya; hanya interaksinya yang terhalang sampai sandi diganti.
+function showPasswordModal(message) {
+  $("pwModal").classList.add("show");
+  if (message) $("pwMsg").textContent = message;
+}
+
+$("pwModal").onsubmit = async (event) => {
+  event.preventDefault();
+  const oldPass = $("pwOld").value, newPass = $("pwNew").value, again = $("pwNew2").value;
+  if (!oldPass || !newPass) { $("pwMsg").textContent = "isi sandi lama dan sandi baru"; return; }
+  if (newPass !== again) { $("pwMsg").textContent = "ulangi sandi baru tidak sama"; return; }
+  const res = await fetch("/api/password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ old_password: oldPass, new_password: newPass }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { $("pwMsg").textContent = data.error || ("gagal ganti sandi (" + res.status + ")"); return; }
+  $("pwMsg").textContent = "sandi diganti — memuat ulang panel...";
+  location.reload();
+};
+
 async function api(path, init) {
   const url = new URL(path, location.origin);
   const res = await fetch(url, init);
   if (res.status === 401 && path !== "/api/login") { location.replace("/login"); throw new Error("unauthorized"); }
+  if (res.status === 403) {
+    // Server menolak endpoint lain selama sesi masih memakai sandi bawaan.
+    const data = await res.clone().json().catch(() => ({}));
+    if (data.must_change_password) showPasswordModal(data.error || "ganti sandi dulu");
+  }
   return res;
 }
 
@@ -805,6 +851,9 @@ $("btnLogout").onclick = async () => { await fetch("/api/logout", { method: "POS
 
 (async () => {
   if (!(await loadMe())) return;
+  // Sesi bertanda wajib-ganti-sandi: tampilkan form ganti sandi saja, jangan muat data panel
+  // (server menolak endpoint lain dengan 403 selama sandi bawaan masih dipakai).
+  if (me.must_change_password) { showPasswordModal("Panel masih memakai sandi bawaan — ganti sandi untuk melanjutkan."); return; }
   await loadSettings();
   await reload();
   await loadSources();

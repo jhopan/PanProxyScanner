@@ -339,5 +339,6 @@ case "$SERVICE" in
     esac ;;
 esac
 say ""
-say "login panel bawaan: admin / admin (ganti di menu Scheduler → Akun & API)."
+say "login panel: pakai kredensial bawaan saat login pertama — panel langsung meminta ganti"
+say "             sandi (minimal 8 karakter, tidak boleh sandi bawaan) sebelum bisa dipakai."
 say ""

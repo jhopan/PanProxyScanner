@@ -240,6 +240,15 @@ status HTTP, jumlah proxy, dan ms dari siklus terakhir — plus tombol **matikan
 Sumber ditambahkan/disunting di situ langsung dipakai pada siklus berikutnya; katalog bawaan
 (55 entri) diisi otomatis saat pertama kali dijalankan.
 
+## Sandi panel
+
+Login pertama memakai kredensial bawaan `admin` / `admin`. Panel **mewajibkan** penggantian sandi
+saat itu: sampai diganti, semua endpoint selain login/logout/ganti-sandi/health dibalas 403 dan
+panel hanya menampilkan form ganti sandi (sandi baru minimal 8 karakter, tidak boleh `admin`).
+
+Kalau sandi hilang: ubah `admin_password_hash` di `~/.panproxyscanner/settings.json` (SHA-256 hex
+dari sandi baru) lalu jalankan ulang layanannya. Halaman login sengaja tidak memuat petunjuk ini.
+
 ## Notifikasi Telegram (opsional)
 
 Isi **Bot token** dan **Chat id** di panel (Scheduler -> Supabase/Notifikasi), lalu tekan **Kirim uji**.

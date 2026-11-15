@@ -103,6 +103,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/login", s.handleLogin)
 	mux.HandleFunc("/api/logout", s.handleLogout)
 	mux.HandleFunc("/api/me", s.handleMe)
+	mux.HandleFunc("/api/password", s.handlePassword)
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/stats", s.handleStats)
@@ -140,8 +141,12 @@ func (s *Server) Handler() http.Handler {
 //   - /api/health terbuka supaya bisa dipakai monitoring/tunnel check.
 //   - /api/pool-purge terbuka: panel CFVPN Hub memverifikasi dirinya sendiri lewat body
 //     (username + hash → RPC whoami) dan DELETE-nya memakai service key di sisi scanner.
+//   - sesi yang masuk dengan sandi bawaan (must_change_password) hanya boleh menyentuh
+//     /api/login, /api/logout, /api/me, /api/password, /api/health, dan aset statis; endpoint
+//     /api/* lain dibalas 403 sampai sandinya diganti.
 //   - rute lain: sesi valid ATAU token API (kalau token diatur di pengaturan) — token
 //     dipakai klien mesin seperti panel CFVPN Hub yang tidak bisa login lewat browser.
+//     Aturan wajib-ganti-sandi tidak berlaku untuk token mesin.
 func (s *Server) withCommon(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -153,13 +158,19 @@ func (s *Server) withCommon(next http.Handler) http.Handler {
 		}
 
 		path := r.URL.Path
+		_, state, loggedIn := s.sessions.RequestState(r)
+		if loggedIn && state.MustChangePass && strings.HasPrefix(path, "/api/") && !mustChangeAllowed(path) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "ganti sandi dulu", "must_change_password": true})
+			return
+		}
+
 		public := path == "/login" || path == "/api/login" || path == "/api/health" || path == "/api/pool-purge"
 		if public {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		if _, ok := s.sessions.UserFromRequest(r); ok {
+		if loggedIn {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -181,6 +192,16 @@ func (s *Server) withCommon(next http.Handler) http.Handler {
 		}
 		http.Redirect(w, r, "/login", http.StatusFound)
 	})
+}
+
+// mustChangeAllowed melaporkan endpoint /api/* yang tetap boleh dipakai sesi bertanda wajib
+// ganti sandi: masuk/keluar, status login, dan ganti sandi itu sendiri.
+func mustChangeAllowed(path string) bool {
+	switch path {
+	case "/api/login", "/api/logout", "/api/me", "/api/password", "/api/health":
+		return true
+	}
+	return false
 }
 
 // handleLoginPage menyajikan halaman login; pengguna yang sudah login langsung diarahkan.
@@ -208,13 +229,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := s.currentSettings()
-	token, ok := s.sessions.Login(body.Username, body.Password, cfg.AdminUser, cfg.AdminPasswordHash, settings.HashPassword)
+	token, mustChange, ok := s.sessions.Login(body.Username, body.Password, cfg.AdminUser, cfg.AdminPasswordHash, settings.DefaultPasswordHash(), settings.HashPassword)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "username atau password salah"})
 		return
 	}
 	auth.SetCookie(w, r, token)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": cfg.AdminUser})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": cfg.AdminUser, "must_change_password": mustChange})
 }
 
 // handleLogout menghapus sesi.
@@ -230,14 +251,67 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleMe memberi tahu status login (dipakai shell website).
+// handleMe memberi tahu status login (dipakai shell website) termasuk tanda wajib-ganti-sandi.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	user, ok := s.sessions.UserFromRequest(r)
+	_, state, ok := s.sessions.RequestState(r)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"logged_in": false})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"logged_in": true, "user": user})
+	writeJSON(w, http.StatusOK, map[string]any{"logged_in": true, "user": state.User, "must_change_password": state.MustChangePass})
+}
+
+// handlePassword mengganti sandi admin dari panel: sandi lama diverifikasi terhadap hash
+// tersimpan, sandi baru minimal 8 karakter dan tidak boleh sandi bawaan. Setelah berhasil,
+// hash baru disimpan ke settings.json dan tanda wajib-ganti-sandi sesi ini dibersihkan.
+// Sandi tidak pernah dicatat ke log.
+func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "pakai POST"})
+		return
+	}
+	token, _, ok := s.sessions.RequestState(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "belum login (POST /api/login)"})
+		return
+	}
+	var body struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body JSON tidak valid"})
+		return
+	}
+
+	// Pemeriksaan di dalam kunci supaya hash lama tidak berubah di tengah jalan (POST
+	// /api/settings bisa mengganti sandi bersamaan).
+	s.mu.Lock()
+	cfg := *s.settings
+	switch {
+	case !auth.PasswordMatches(cfg.AdminPasswordHash, body.OldPassword, settings.HashPassword):
+		s.mu.Unlock()
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "sandi lama salah"})
+		return
+	case body.NewPassword == "admin":
+		s.mu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": `sandi baru tidak boleh "admin" (sandi bawaan)`})
+		return
+	case len(body.NewPassword) < 8:
+		s.mu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sandi baru minimal 8 karakter"})
+		return
+	}
+	cfg.AdminPasswordHash = settings.HashPassword(body.NewPassword)
+	*s.settings = cfg
+	s.mu.Unlock()
+
+	if err := cfg.Save(s.cfgPath); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "gagal menyimpan pengaturan: " + err.Error()})
+		return
+	}
+	s.sessions.ClearMustChange(token)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // ---------------------------------------------------------------- Supabase (sinkron proxy_pool)

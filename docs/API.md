@@ -30,17 +30,38 @@ Aturan akses:
 
 Tanpa sesi/token, `/api/*` menjawab `401`, sedangkan halaman HTML dialihkan (`302`) ke `/login`.
 
+**Sandi bawaan wajib diganti saat login pertama.** Selama `admin_password_hash` masih hash
+bawaan (`admin`), sesi yang dibuat lewat `POST /api/login` ditandai wajib-ganti-sandi: balasan
+login dan `GET /api/me` menyertakan `must_change_password: true`. Sesi bertanda itu hanya boleh
+menyentuh `/api/login`, `/api/logout`, `/api/me`, `/api/password`, `/api/health`, dan halaman
+statis (path di luar `/api/`); endpoint `/api/*` lain dibalas `403` dengan
+`{ "error": "ganti sandi dulu", "must_change_password": true }` sampai sandi diganti. Sesi yang
+masuk dengan hash non-bawaan (host yang sandinya sudah diganti, atau `PS_ADMIN_PASSWORD` di
+`.env`) **tidak** ditandai, jadi alur normal tidak berubah. Klien mesin dengan `X-Api-Token`
+tidak terkena aturan ini.
+
 | Endpoint | Guna |
 |---|---|
-| `POST /api/login` | masuk. Body `{"username","password"}` → `{ "ok": true, "user": "admin" }` + cookie |
+| `POST /api/login` | masuk. Body `{"username","password"}` → `{ "ok": true, "user": "admin", "must_change_password": false }` + cookie |
 | `POST /api/logout` | hapus sesi (cookie dibersihkan) |
-| `GET /api/me` | `{ "logged_in": true, "user": "admin" }` atau `401` |
+| `GET /api/me` | `{ "logged_in": true, "user": "admin", "must_change_password": false }` atau `401` |
+| `POST /api/password` | ganti sandi sesi ini. Body `{"old_password","new_password"}` → `{ "ok": true }` |
+
+`POST /api/password` memakai sesi (bukan token API: token mesin tidak punya sandi). Urutan
+pemeriksaannya: sandi lama harus cocok dengan hash tersimpan (`401` `sandi lama salah`), lalu
+sandi baru tidak boleh `admin` (`400`) dan minimal **8 karakter** (`400`). Setelah berhasil,
+hash SHA-256 baru disimpan ke `settings.json` dan tanda wajib-ganti-sandi sesi itu dibersihkan;
+sandi tidak pernah masuk log.
 
 ```bash
 # login lalu pakai cookie untuk permintaan berikutnya
 curl -c cookie.txt -X POST http://127.0.0.1:8787/api/login \
-  -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}'
+  -H "Content-Type: application/json" -d '{"username":"admin","password":"<sandi>"}'
 curl -b cookie.txt "http://127.0.0.1:8787/api/proxies.txt?limit=5"
+
+# ganti sandi sesi ini (wajib saat masih memakai sandi bawaan)
+curl -b cookie.txt -X POST http://127.0.0.1:8787/api/password \
+  -H "Content-Type: application/json" -d '{"old_password":"admin","new_password":"sandi-baru-ku"}'
 
 # klien mesin (tanpa login)
 curl -H "X-Api-Token: <token>" "http://127.0.0.1:8787/api/proxies.txt?limit=5"
@@ -733,7 +754,7 @@ disimpan ke `settings.json` dan diterapkan ke penjadwal.
 | `fresh_minutes` | jendela "hidup & segar" di statistik | ≥1 |
 | `purge_dead_hours` | housekeeping otomatis (0 = tidak) | ≥0 |
 | `admin_user` | username login website | string non-kosong |
-| `admin_password` | sandi login (ditulis sebagai hash; kosong = tidak diganti) | string |
+| `admin_password` | sandi login (ditulis sebagai hash; kosong = tidak diganti). Lewat `POST /api/password` sandi baru wajib ≥8 karakter dan bukan `admin` | string |
 | `public_url` | URL publik hasil tunnel (informasi di halaman Tunnel CF) | string/URL |
 | `tunnel_name` | nama tunnel Cloudflare (dipakai di perintah & config.yml) | string |
 | `tunnel_domain` | domain yang diarahkan ke panel | hostname |

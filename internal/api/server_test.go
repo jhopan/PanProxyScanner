@@ -1802,3 +1802,274 @@ func TestRunPipelineSyncSendsLocalCheckNotification(t *testing.T) {
 		}
 	}
 }
+
+// -------------------------------------------------------- wajib ganti sandi saat login pertama
+
+// newLoginTestServer membuat server lengkap (store + penjadwal + settings.json sementara) untuk
+// menguji alur login dan ganti sandi tanpa menyentuh host mana pun.
+func newLoginTestServer(t *testing.T, cfg settings.Settings) (*Server, http.Handler) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "login.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	runner := scraper.NewRunner(st)
+	srv := &Server{
+		store:    st,
+		runner:   runner,
+		settings: &cfg,
+		sessions: auth.New(),
+		cfgPath:  filepath.Join(t.TempDir(), "settings.json"),
+		addr:     "127.0.0.1:8787",
+	}
+	srv.sched = scraper.NewScheduler(runner, cfg)
+	return srv, srv.Handler()
+}
+
+// loginPanel menjalankan POST /api/login dan mengembalikan cookie sesi + balasan JSON.
+func loginPanel(t *testing.T, handler http.Handler, user, password string) (*http.Cookie, map[string]any) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]string{"username": user, "password": password})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(string(payload))))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login %q harus 200, dapat %d: %s", user, rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	var cookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == auth.CookieName {
+			cookie = c
+		}
+	}
+	if cookie == nil {
+		t.Fatal("login harus menulis cookie sesi")
+	}
+	return cookie, out
+}
+
+// doPanel menjalankan request dengan cookie sesi (cookie nil = tanpa sesi). body kosong = tanpa body.
+func doPanel(t *testing.T, handler http.Handler, method, path string, cookie *http.Cookie, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// Login pertama dengan sandi bawaan menandai sesi wajib-ganti-sandi; selama tanda itu aktif
+// semua endpoint /api/* lain dibalas 403, kecuali yang dipakai untuk ganti sandi.
+func TestLoginWithDefaultPasswordRequiresChange(t *testing.T) {
+	_, handler := newLoginTestServer(t, settings.Default())
+
+	cookie, login := loginPanel(t, handler, "admin", "admin")
+	if login["must_change_password"] != true {
+		t.Fatalf("login dengan hash bawaan harus menandai wajib ganti sandi, dapat %v", login)
+	}
+
+	rec := doPanel(t, handler, http.MethodGet, "/api/me", cookie, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/api/me harus 200, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	var me map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil {
+		t.Fatal(err)
+	}
+	if me["logged_in"] != true || me["must_change_password"] != true {
+		t.Fatalf("/api/me harus melaporkan tanda wajib ganti sandi, dapat %v", me)
+	}
+
+	// Halaman panel dan health tetap dilayani supaya form ganti sandi bisa termuat.
+	if rec := doPanel(t, handler, http.MethodGet, "/", cookie, ""); rec.Code != http.StatusOK {
+		t.Fatalf("halaman panel harus tetap dilayani, dapat %d", rec.Code)
+	}
+	if rec := doPanel(t, handler, http.MethodGet, "/api/health", nil, ""); rec.Code != http.StatusOK {
+		t.Fatalf("/api/health tetap publik, dapat %d", rec.Code)
+	}
+
+	blocked := []struct{ method, path string }{
+		{http.MethodGet, "/api/stats"},
+		{http.MethodGet, "/api/settings"},
+		{http.MethodGet, "/api/proxies"},
+		{http.MethodGet, "/api/proxies.txt"},
+		{http.MethodGet, "/api/countries"},
+		{http.MethodGet, "/api/sources"},
+		{http.MethodGet, "/api/tunnel"},
+		{http.MethodGet, "/api/pipeline"},
+		{http.MethodGet, "/api/supabase/status"},
+		{http.MethodPost, "/api/now"},
+		{http.MethodPost, "/api/scrape"},
+		{http.MethodPost, "/api/pool-purge"},
+	}
+	for _, c := range blocked {
+		rec := doPanel(t, handler, c.method, c.path, cookie, "")
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s %s saat wajib ganti sandi harus 403, dapat %d: %s", c.method, c.path, rec.Code, rec.Body.String())
+		}
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if out["error"] != "ganti sandi dulu" || out["must_change_password"] != true {
+			t.Fatalf("%s %s harus menjawab penanda wajib ganti sandi, dapat %v", c.method, c.path, out)
+		}
+	}
+
+	// Keluar tetap boleh supaya sesi bermasalah bisa diakhiri.
+	if rec := doPanel(t, handler, http.MethodPost, "/api/logout", cookie, ""); rec.Code != http.StatusOK {
+		t.Fatalf("logout harus tetap boleh, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doPanel(t, handler, http.MethodGet, "/api/me", cookie, ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("sesi yang sudah logout harus 401, dapat %d", rec.Code)
+	}
+}
+
+// Alur ganti sandi: sandi lama salah → 401, sandi baru pendek/`admin` → 400, sukses mengubah
+// hash tersimpan, membersihkan tanda, dan mengembalikan akses normal.
+func TestPasswordChangeFlow(t *testing.T) {
+	srv, handler := newLoginTestServer(t, settings.Default())
+	cookie, _ := loginPanel(t, handler, "admin", "admin")
+
+	bad := doPanel(t, handler, http.MethodPost, "/api/password", cookie, `{"old_password":"salah","new_password":"sandi-baru-ku"}`)
+	if bad.Code != http.StatusUnauthorized {
+		t.Fatalf("sandi lama salah harus 401, dapat %d: %s", bad.Code, bad.Body.String())
+	}
+
+	short := doPanel(t, handler, http.MethodPost, "/api/password", cookie, `{"old_password":"admin","new_password":"pendek"}`)
+	if short.Code != http.StatusBadRequest || !strings.Contains(short.Body.String(), "minimal 8") {
+		t.Fatalf("sandi baru pendek harus 400 dengan pesan jelas, dapat %d: %s", short.Code, short.Body.String())
+	}
+
+	same := doPanel(t, handler, http.MethodPost, "/api/password", cookie, `{"old_password":"admin","new_password":"admin"}`)
+	if same.Code != http.StatusBadRequest || !strings.Contains(same.Body.String(), "bawaan") {
+		t.Fatalf(`sandi baru "admin" harus ditolak 400, dapat %d: %s`, same.Code, same.Body.String())
+	}
+	if got := srv.currentSettings().AdminPasswordHash; got != settings.DefaultPasswordHash() {
+		t.Fatalf("penolakan tidak boleh mengubah hash tersimpan, dapat %q", got)
+	}
+
+	const baru = "sandi-baru-ku"
+	okRec := doPanel(t, handler, http.MethodPost, "/api/password", cookie, `{"old_password":"admin","new_password":"`+baru+`"}`)
+	if okRec.Code != http.StatusOK {
+		t.Fatalf("ganti sandi yang sah harus 200, dapat %d: %s", okRec.Code, okRec.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(okRec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out["ok"] != true {
+		t.Fatalf("balasan ganti sandi harus {ok:true}, dapat %v", out)
+	}
+	if strings.Contains(okRec.Body.String(), baru) {
+		t.Fatalf("balasan tidak boleh memuat sandi, dapat %s", okRec.Body.String())
+	}
+
+	if got := srv.currentSettings().AdminPasswordHash; got != settings.HashPassword(baru) {
+		t.Fatalf("hash di memori harus ikut berubah, dapat %q", got)
+	}
+	saved, err := settings.Load(srv.cfgPath)
+	if err != nil {
+		t.Fatalf("settings.json harus tersimpan: %v", err)
+	}
+	if saved.AdminPasswordHash != settings.HashPassword(baru) {
+		t.Fatalf("hash tersimpan salah: %q", saved.AdminPasswordHash)
+	}
+	raw, err := os.ReadFile(srv.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), baru) {
+		t.Fatal("sandi tidak boleh ditulis apa adanya ke settings.json")
+	}
+
+	rec := doPanel(t, handler, http.MethodGet, "/api/me", cookie, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/api/me harus 200, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	var meAfter map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &meAfter); err != nil {
+		t.Fatal(err)
+	}
+	if meAfter["must_change_password"] != false {
+		t.Fatalf("/api/me setelah ganti sandi tidak boleh menandai lagi, dapat %v", meAfter)
+	}
+	for _, path := range []string{"/api/settings", "/api/stats"} {
+		if rec := doPanel(t, handler, http.MethodGet, path, cookie, ""); rec.Code != http.StatusOK {
+			t.Fatalf("%s harus 200 setelah ganti sandi, dapat %d: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Sandi lama tidak berlaku lagi; login dengan sandi baru tidak menandai apa pun.
+	if rec := doPanel(t, handler, http.MethodPost, "/api/login", nil, `{"username":"admin","password":"admin"}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("sandi lama harus ditolak setelah diganti, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	cookie2, login2 := loginPanel(t, handler, "admin", baru)
+	if login2["must_change_password"] != false {
+		t.Fatalf("login dengan sandi baru tidak boleh ditandai, dapat %v", login2)
+	}
+	if rec := doPanel(t, handler, http.MethodGet, "/api/settings", cookie2, ""); rec.Code != http.StatusOK {
+		t.Fatalf("sesi baru harus bisa memakai panel, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Host yang sandinya sudah diganti (hash non-bawaan) tidak boleh terkena alur baru: login biasa,
+// tanpa tanda wajib ganti sandi, dan endpoint lain langsung bisa dipakai. Token mesin juga tetap
+// tidak terpengaruh.
+func TestLoginWithCustomHashDoesNotRequireChange(t *testing.T) {
+	cfg := settings.Default()
+	cfg.AdminPasswordHash = settings.HashPassword("sandi-produksi-x")
+	srv, handler := newLoginTestServer(t, cfg)
+
+	if rec := doPanel(t, handler, http.MethodPost, "/api/login", nil, `{"username":"admin","password":"admin"}`); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("sandi bawaan harus ditolak di host ini, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+
+	cookie, login := loginPanel(t, handler, "admin", "sandi-produksi-x")
+	if login["must_change_password"] != false {
+		t.Fatalf("hash non-bawaan tidak boleh menandai wajib ganti sandi, dapat %v", login)
+	}
+	rec := doPanel(t, handler, http.MethodGet, "/api/me", cookie, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/api/me harus 200 di host dengan sandi khusus, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	var me map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil {
+		t.Fatal(err)
+	}
+	if me["must_change_password"] != false {
+		t.Fatalf("/api/me tidak boleh menandai di host dengan sandi khusus, dapat %v", me)
+	}
+	for _, path := range []string{"/api/settings", "/api/stats", "/api/proxies"} {
+		if rec := doPanel(t, handler, http.MethodGet, path, cookie, ""); rec.Code != http.StatusOK {
+			t.Fatalf("%s harus 200 di host dengan sandi khusus, dapat %d: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	if got := srv.currentSettings().AdminPasswordHash; got != settings.HashPassword("sandi-produksi-x") {
+		t.Fatalf("hash host produksi tidak boleh berubah, dapat %q", got)
+	}
+
+	cfgToken := settings.Default()
+	cfgToken.Token = "token-mesin"
+	_, handlerToken := newLoginTestServer(t, cfgToken)
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	req.Header.Set("X-Api-Token", "token-mesin")
+	rec = httptest.NewRecorder()
+	handlerToken.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("token mesin harus tetap bisa memakai /api/*, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+}

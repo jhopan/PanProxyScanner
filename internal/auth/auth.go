@@ -20,6 +20,16 @@ const SessionTTL = 24 * time.Hour
 type session struct {
 	user    string
 	expires time.Time
+	// mustChange menandai sesi yang masuk dengan sandi bawaan: panel wajib mengganti sandi
+	// sebelum endpoint lain boleh dipakai.
+	mustChange bool
+}
+
+// State adalah kondisi sesi berjalan: user yang login dan apakah sesi itu masih wajib
+// mengganti sandi (ditandai saat login memakai hash bawaan).
+type State struct {
+	User           string
+	MustChangePass bool
 }
 
 // Manager menyimpan sesi login di memori. Restart proses = semua sesi logout.
@@ -33,41 +43,69 @@ func New() *Manager {
 	return &Manager{sessions: make(map[string]session)}
 }
 
+// PasswordMatches membandingkan sandi dengan hash tersimpan dalam waktu konstan.
+func PasswordMatches(hash, password string, hashPassword func(string) string) bool {
+	return subtle.ConstantTimeCompare([]byte(hashPassword(password)), []byte(hash)) == 1
+}
+
 // Login memeriksa kredensial (dibandingkan dalam waktu konstan) lalu membuat sesi.
-// Mengembalikan token sesi kalau berhasil.
-func (m *Manager) Login(user, password, wantUser, wantHash string, hashPassword func(string) string) (string, bool) {
+// Sesi ditandai wajib-ganti-sandi kalau hash yang dipakai untuk masuk masih hash bawaan
+// (`defaultHash`), supaya sandi bawaan tidak bisa dipakai mengelola apa pun.
+// Mengembalikan token sesi, tanda wajib-ganti-sandi, dan status keberhasilan.
+func (m *Manager) Login(user, password, wantUser, wantHash, defaultHash string, hashPassword func(string) string) (string, bool, bool) {
 	if subtle.ConstantTimeCompare([]byte(user), []byte(wantUser)) != 1 {
-		return "", false
+		return "", false, false
 	}
-	if subtle.ConstantTimeCompare([]byte(hashPassword(password)), []byte(wantHash)) != 1 {
-		return "", false
+	if !PasswordMatches(wantHash, password, hashPassword) {
+		return "", false, false
 	}
 	token, err := randomToken()
 	if err != nil {
-		return "", false
+		return "", false, false
 	}
+	mustChange := defaultHash != "" && wantHash == defaultHash
 	m.mu.Lock()
-	m.sessions[token] = session{user: user, expires: time.Now().Add(SessionTTL)}
+	m.sessions[token] = session{user: user, expires: time.Now().Add(SessionTTL), mustChange: mustChange}
 	m.mu.Unlock()
-	return token, true
+	return token, mustChange, true
 }
 
 // Validate memeriksa token sesi.
 func (m *Manager) Validate(token string) (string, bool) {
+	st, ok := m.State(token)
+	return st.User, ok
+}
+
+// State mengembalikan kondisi sesi untuk token; ok=false kalau token kosong/tidak dikenal/
+// sudah kedaluwarsa.
+func (m *Manager) State(token string) (State, bool) {
 	if token == "" {
-		return "", false
+		return State{}, false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s, ok := m.sessions[token]
 	if !ok {
-		return "", false
+		return State{}, false
 	}
 	if time.Now().After(s.expires) {
 		delete(m.sessions, token)
-		return "", false
+		return State{}, false
 	}
-	return s.user, true
+	return State{User: s.user, MustChangePass: s.mustChange}, true
+}
+
+// ClearMustChange menghapus tanda wajib-ganti-sandi dari sebuah sesi (dipakai setelah sandi
+// benar-benar diganti). Sesi sudah hilang/kedaluwarsa = no-op.
+func (m *Manager) ClearMustChange(token string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[token]
+	if !ok {
+		return
+	}
+	s.mustChange = false
+	m.sessions[token] = s
 }
 
 // Logout menghapus sesi.
@@ -79,11 +117,22 @@ func (m *Manager) Logout(token string) {
 
 // UserFromRequest mengambil user dari cookie sesi.
 func (m *Manager) UserFromRequest(r *http.Request) (string, bool) {
+	_, st, ok := m.RequestState(r)
+	return st.User, ok
+}
+
+// RequestState mengembalikan token cookie + kondisi sesi permintaan. Dipakai gate (withCommon)
+// dan handler yang butuh token untuk membersihkan tanda wajib-ganti-sandi.
+func (m *Manager) RequestState(r *http.Request) (string, State, bool) {
 	cookie, err := r.Cookie(CookieName)
 	if err != nil {
-		return "", false
+		return "", State{}, false
 	}
-	return m.Validate(cookie.Value)
+	st, ok := m.State(cookie.Value)
+	if !ok {
+		return "", State{}, false
+	}
+	return cookie.Value, st, true
 }
 
 // SetCookie menulis cookie sesi.
