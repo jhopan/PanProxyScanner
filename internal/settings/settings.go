@@ -60,6 +60,8 @@ type Settings struct {
 	LowYieldMinEntries  int            `json:"low_yield_min_entries"`  // minimal entri agar sumber dinilai
 	CountryTopUp        int            `json:"country_top_up"`         // kandidat tambahan per siklus untuk negara di bawah target
 	Token               string         `json:"token,omitempty"`        // kalau diisi, API wajib token (untuk klien mesin)
+	TelegramBotToken    string         `json:"telegram_bot_token"`     // token bot Telegram; notifikasi aktif kalau ini DAN chat id terisi; tidak pernah dikirim ke klien
+	TelegramChatID      string         `json:"telegram_chat_id"`       // tujuan notifikasi (chat/grup id)
 }
 
 // DefaultCountryTargets adalah target awal stok per negara. Negara di sini didahulukan
@@ -284,6 +286,10 @@ func (s *Settings) Normalize() {
 	if _, err := time.LoadLocation(s.ScheduleTimezone); err != nil {
 		s.ScheduleTimezone = d.ScheduleTimezone
 	}
+	// Token bot dan chat id dibiarkan kosong (notifikasi mati); yang penting tidak ada spasi
+	// atau baris baru sisa salin-tempel yang membuat request ke Telegram gagal.
+	s.TelegramBotToken = strings.TrimSpace(s.TelegramBotToken)
+	s.TelegramChatID = strings.TrimSpace(s.TelegramChatID)
 }
 
 // validClock memeriksa format "HH:MM".

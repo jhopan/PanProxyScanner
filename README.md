@@ -240,6 +240,19 @@ status HTTP, jumlah proxy, dan ms dari siklus terakhir — plus tombol **matikan
 Sumber ditambahkan/disunting di situ langsung dipakai pada siklus berikutnya; katalog bawaan
 (55 entri) diisi otomatis saat pertama kali dijalankan.
 
+## Notifikasi Telegram (opsional)
+
+Isi **Bot token** dan **Chat id** di panel (Scheduler -> Supabase/Notifikasi), lalu tekan **Kirim uji**.
+Kalau keduanya terisi, scanner mengirim dua pesan:
+
+1. Setelah scrape penuh harian selesai (langkah push): ringkasan kandidat ditarik, hidup, mati,
+   dikirim ke pool, dan durasinya.
+2. Setelah cek lokal tiap 6 jam: berapa baris diperiksa ulang, masih hidup, dan sudah mati.
+
+Pengiriman memakai HTTP biasa ke `api.telegram.org` tanpa dependensi tambahan, dan bersifat
+best-effort: kalau Telegram tidak bisa dihubungi, pipeline tetap jalan dan alasannya hanya dicatat
+pada langkah pipeline (`GET /api/pipeline`).
+
 ## Sinkronisasi ke Supabase (untuk cfvpn-hub)
 
 Panel CFVPN Hub tidak perlu lagi memverifikasi proxy sendiri (yang membuat bandwidth

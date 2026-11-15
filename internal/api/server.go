@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jhopan/Pan-ProxyScanner/internal/auth"
+	"github.com/jhopan/Pan-ProxyScanner/internal/notify"
 	"github.com/jhopan/Pan-ProxyScanner/internal/scraper"
 	"github.com/jhopan/Pan-ProxyScanner/internal/settings"
 	"github.com/jhopan/Pan-ProxyScanner/internal/store"
@@ -77,6 +78,10 @@ type Server struct {
 	// writeKeyOnce memastikan catatan "operasi tulis jatuh ke anon key" hanya masuk log sekali
 	// per proses — catatan yang sama muncul lagi di ringkasan sinkron tiap operasi tulis.
 	writeKeyOnce sync.Once
+	// notifyClient membuat klien Telegram; kosong = notify.New. Hanya diisi tes supaya endpoint
+	// /api/notify-test dan notifikasi pipeline bisa diarahkan ke server stub (tidak pernah
+	// mengirim pesan sungguhan).
+	notifyClient func(token, chatID string) *notify.Client
 }
 
 // New membuat server. `cfgPath` adalah lokasi settings.json (dipakai saat menyimpan).
@@ -116,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/tunnel", s.handleTunnel)
 	mux.HandleFunc("/api/pipeline", s.handlePipeline)
 	mux.HandleFunc("/api/pipeline/run", s.handlePipelineRun)
+	mux.HandleFunc("/api/notify-test", s.handleNotifyTest)
 	mux.HandleFunc("/api/supabase/status", s.handleSupabaseStatus)
 	mux.HandleFunc("/api/supabase/test", s.handleSupabaseTest)
 	mux.HandleFunc("/api/supabase/push", s.handleSupabasePush)
@@ -1488,6 +1494,11 @@ func (s *Server) runPipelineLocked(testOnly bool) error {
 	}
 
 	// --- langkah 2: scrape sumber lalu verifikasi ---
+	// Notifikasi harian butuh angka langkah scrape + jumlah baris yang dikirim langkah push,
+	// jadi keduanya ditampung dulu; pesannya dikirim setelah langkah push selesai.
+	var scrapeCounts map[string]int
+	var scrapeMS int64
+	pushedRows := -1 // -1 = langkah push dilewati → pesan menulis "-"
 	if testOnly {
 		// Cek lokal (jadwal 6 jam): refresh baris tersimpan + pass target negara, tanpa
 		// mengambil sumber baru dan tanpa menarik ulang dari Supabase.
@@ -1508,6 +1519,8 @@ func (s *Server) runPipelineLocked(testOnly bool) error {
 			localStep.Note = fmt.Sprintf("%d baris diverifikasi ulang", localProgress.Refreshed)
 		}
 		s.addPipelineStep(localStep)
+		// Pesan "cek 6 jam": best-effort; kalau kirim gagal, catatannya menempel di langkah ini.
+		s.notifyPipeline(ctx, cfg, localStep.Name, notify.LocalMessage(localStep.Counts))
 	} else {
 		started := time.Now()
 		opts := scraper.OptionsFromSettings(cfg)
@@ -1533,6 +1546,7 @@ func (s *Server) runPipelineLocked(testOnly bool) error {
 			step.Note = fmt.Sprintf("%d kandidat diperiksa, %d hidup", progress.Checked, progress.Alive)
 		}
 		s.addPipelineStep(step)
+		scrapeCounts, scrapeMS = step.Counts, step.MS
 
 	}
 
@@ -1565,8 +1579,18 @@ func (s *Server) runPipelineLocked(testOnly bool) error {
 		}
 		step.Note = appendNote(step.Note, clients.note)
 		s.addPipelineStep(step)
+		pushedRows = pushed
 	} else {
 		s.addPipelineStep(PipelineStep{Name: "push ke Supabase", OK: true, Note: "dilewati (belum dikonfigurasi / limit 0)"})
+	}
+
+	// --- notifikasi harian (best-effort) ---
+	// Hanya jalur siklus penuh (harian / catch-up), bukan cek lokal 6 jam — dan hanya setelah
+	// langkah push selesai supaya jumlah baris yang dikirim ke pool ikut terlaporkan.
+	// Kegagalan kirim tidak pernah menggagalkan pipeline: hanya satu baris log + catatan langkah.
+	if !testOnly {
+		s.notifyPipeline(ctx, cfg, "scrape sumber & verifikasi",
+			notify.DailyMessage(scrapeCounts, pushedRows, time.Duration(scrapeMS)*time.Millisecond))
 	}
 
 	// --- langkah 4: housekeeping baris mati di Supabase ---
@@ -1654,6 +1678,48 @@ func (s *Server) addPipelineStep(step PipelineStep) {
 	})
 }
 
+// telegramClient membuat klien Telegram dari setelan; tes mengganti pembuatnya supaya tidak
+// pernah ada request ke api.telegram.org.
+func (s *Server) telegramClient(cfg settings.Settings) *notify.Client {
+	if s.notifyClient != nil {
+		return s.notifyClient(cfg.TelegramBotToken, cfg.TelegramChatID)
+	}
+	return notify.New(cfg.TelegramBotToken, cfg.TelegramChatID)
+}
+
+// notifyPipeline mengirim satu notifikasi Telegram untuk langkah pipeline `stepName`.
+//
+// Best-effort: tanpa setelan lengkap fungsi ini tidak melakukan apa pun, dan kegagalan kirim
+// hanya menghasilkan satu baris log + catatan singkat pada langkah tersebut — pipeline tetap
+// dianggap sukses (langkahnya tidak pernah diubah jadi gagal).
+func (s *Server) notifyPipeline(ctx context.Context, cfg settings.Settings, stepName, text string) {
+	client := s.telegramClient(cfg)
+	if !client.Configured() {
+		return
+	}
+	started := time.Now()
+	status, err := client.Send(ctx, text)
+	if err != nil {
+		log.Printf("notifikasi Telegram gagal (%s): %v", stepName, err)
+		s.annotatePipelineStep(stepName, "notifikasi gagal: "+err.Error())
+		return
+	}
+	log.Printf("notifikasi Telegram terkirim (%s): HTTP %d dalam %d ms", stepName, status, time.Since(started).Milliseconds())
+}
+
+// annotatePipelineStep menambahkan catatan pada langkah pipeline yang sudah tercatat; langkah
+// yang tidak ditemukan (mis. pipeline lain sudah menimpa status) diabaikan tanpa efek samping.
+func (s *Server) annotatePipelineStep(name, note string) {
+	s.setPipeline(func(p *PipelineStatus) {
+		for i := range p.Steps {
+			if p.Steps[i].Name == name {
+				p.Steps[i].Note = appendNote(p.Steps[i].Note, note)
+				return
+			}
+		}
+	})
+}
+
 // handlePipeline melaporkan status pipeline terakhir.
 func (s *Server) handlePipeline(w http.ResponseWriter, r *http.Request) {
 	s.pipelineMu.Lock()
@@ -1687,6 +1753,56 @@ func (s *Server) handlePipelineRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
+}
+
+// notifyTestMessage adalah isi pesan tombol "Kirim uji" di panel.
+const notifyTestMessage = "Pan-VlessCloudflare - uji notifikasi\nSetelan bot dan chat id tersambung."
+
+// handleNotifyTest mengirim satu pesan uji ke Telegram memakai setelan tersimpan, lalu
+// meneruskan hasil balasan Telegram apa adanya (status HTTP-nya ikut dilaporkan).
+//
+// Tanpa setelan lengkap endpoint ini menjawab 503 (token belum ada = fitur belum aktif) atau
+// 400 (token ada tapi chat id kosong) dengan pesan jelas — bukan error 500, karena tidak ada
+// yang rusak, hanya belum diisi.
+func (s *Server) handleNotifyTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "pakai POST"})
+		return
+	}
+	cfg := s.currentSettings()
+	missing := make([]string, 0, 2)
+	if strings.TrimSpace(cfg.TelegramBotToken) == "" {
+		missing = append(missing, "telegram_bot_token")
+	}
+	if strings.TrimSpace(cfg.TelegramChatID) == "" {
+		missing = append(missing, "telegram_chat_id")
+	}
+	if len(missing) > 0 {
+		code := http.StatusServiceUnavailable
+		if strings.TrimSpace(cfg.TelegramBotToken) != "" {
+			// Token sudah ada, jadi yang kurang hanya tujuan: itu kesalahan setelan (400).
+			code = http.StatusBadRequest
+		}
+		writeJSON(w, code, map[string]any{
+			"ok":      false,
+			"error":   "setelan Telegram belum lengkap, isi dulu: " + strings.Join(missing, ", "),
+			"missing": missing,
+		})
+		return
+	}
+
+	status, err := s.telegramClient(cfg).Send(r.Context(), notifyTestMessage)
+	if err != nil {
+		// Balasan Telegram (atau kegagalan jaringan) diteruskan apa adanya; telegram_status 0
+		// berarti request tidak sampai sama sekali.
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok":              false,
+			"error":           err.Error(),
+			"telegram_status": status,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "telegram_status": status})
 }
 
 // nextRun menghitung perkiraan jadwal berikutnya (untuk ditampilkan di UI).
@@ -1941,6 +2057,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		LowYieldCycles      *int            `json:"low_yield_cycles"`
 		LowYieldMinEntries  *int            `json:"low_yield_min_entries"`
 		CountryTopUp        *int            `json:"country_top_up"`
+		TelegramBotToken    *string         `json:"telegram_bot_token"`
+		TelegramChatID      *string         `json:"telegram_chat_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body JSON tidak valid: " + err.Error()})
@@ -2075,6 +2193,14 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if patch.CountryTopUp != nil {
 		cfg.CountryTopUp = *patch.CountryTopUp
 	}
+	// Token bot boleh dikosongkan lewat API (mematikan notifikasi), tapi tidak pernah dikirim
+	// balik ke klien — lihat publicSettings.
+	if patch.TelegramBotToken != nil {
+		cfg.TelegramBotToken = *patch.TelegramBotToken
+	}
+	if patch.TelegramChatID != nil {
+		cfg.TelegramChatID = *patch.TelegramChatID
+	}
 	cfg.Normalize()
 	*s.settings = cfg
 	s.mu.Unlock()
@@ -2133,6 +2259,8 @@ func publicSettings(cfg settings.Settings) map[string]any {
 		"low_yield_min_entries":    cfg.LowYieldMinEntries,
 		"country_top_up":           cfg.CountryTopUp,
 		"token":                    cfg.Token,
+		"telegram_bot_token_set":   cfg.TelegramBotToken != "",
+		"telegram_chat_id":         cfg.TelegramChatID,
 	}
 }
 

@@ -204,6 +204,16 @@
           </div>
           <div class="muted" id="runtime" style="margin-top:10px">—</div>
         </div>
+        <div class="panel">
+          <h2>Notifikasi Telegram</h2>
+          <div class="row">
+            <label>Token bot (BotFather)<input id="tgToken" type="password" size="40" placeholder="kosongkan bila tidak diganti"></label>
+            <label>Chat ID<input id="tgChat" size="22" placeholder="mis. 123456789 atau -1001234567890"></label>
+            <button class="primary" id="btnTgSave">Simpan</button>
+            <button class="ghost" id="btnTgTest">Kirim uji</button>
+          </div>
+          <div class="muted" id="tgState" style="margin-top:10px">—</div>
+        </div>
       </section>
 
       <!-- SUPABASE -->
@@ -503,6 +513,14 @@ function fillSettings(s) {
   $("sPurge").value = s.purge_dead_hours; $("sAdminUser").value = s.admin_user || "admin";
   $("sAdminPass").value = ""; $("sToken").value = s.token || ""; $("sPublicUrl").value = s.public_url || "";
   $("sTunnelName").value = s.tunnel_name || "panproxyscanner"; $("sTunnelDomain").value = s.tunnel_domain || "";
+  // Token tidak pernah dikirim balik server: kolomnya selalu dikosongkan dan hanya placeholder
+  // yang menjelaskan bahwa token sudah tersimpan.
+  $("tgToken").value = "";
+  $("tgToken").placeholder = s.telegram_bot_token_set ? "sudah diset (kosongkan bila tidak diganti)" : "token bot dari BotFather";
+  $("tgChat").value = s.telegram_chat_id || "";
+  $("tgState").innerHTML = s.telegram_bot_token_set && s.telegram_chat_id
+    ? "notifikasi <b>aktif</b>: pesan dikirim setelah scrape harian dan setelah cek 6 jam selesai."
+    : "notifikasi <b>belum aktif</b>: isi token bot <i>dan</i> chat id, lalu simpan.";
 }
 
 async function loadSettings() {
@@ -763,6 +781,23 @@ $("btnSaveAccount").onclick = () => {
   postSettings(patch, "akun & API disimpan");
 };
 $("btnAutoStart").onclick = async () => { const r = await api("/api/auto/start", { method: "POST" }); const d = await r.json(); toast(r.ok ? "otomatis dinyalakan" : "gagal: " + (d.error || r.status)); if (d.settings) fillSettings(d.settings); reload(); };
+$("btnTgSave").onclick = () => {
+  // Chat id selalu dikirim (boleh dikosongkan untuk mematikan notifikasi); token hanya dikirim
+  // kalau diisi, karena server tidak pernah mengirim balik nilai token yang tersimpan.
+  const patch = { telegram_chat_id: $("tgChat").value.trim() };
+  if ($("tgToken").value.trim()) patch.telegram_bot_token = $("tgToken").value.trim();
+  postSettings(patch, "setelan Telegram disimpan");
+};
+$("btnTgTest").onclick = async () => {
+  $("tgState").textContent = "mengirim pesan uji...";
+  const res = await api("/api/notify-test", { method: "POST" });
+  const data = await res.json();
+  const tg = data.telegram_status ? ` (Telegram HTTP ${data.telegram_status})` : "";
+  toast(res.ok ? `pesan uji terkirim${tg}` : "gagal: " + (data.error || res.status));
+  $("tgState").innerHTML = res.ok
+    ? `uji terkirim — Telegram menjawab HTTP <b>${data.telegram_status}</b>.`
+    : `uji gagal${tg} — ${data.error || ("HTTP " + res.status)}`;
+};
 $("btnAutoStop").onclick = async () => { await api("/api/auto/stop", { method: "POST" }); toast("otomatis dimatikan"); await loadSettings(); reload(); };
 $("btnStopCycle").onclick = async () => { const r = await api("/api/stop", { method: "POST" }); toast(r.ok ? "siklus dihentikan" : "tidak ada siklus berjalan"); reload(); };
 $("btnPurge").onclick = async () => { const hours = num("sPurge") || 24; const r = await api("/api/purge?hours=" + hours, { method: "POST" }); const d = await r.json(); toast(r.ok ? d.removed + " catatan mati dihapus" : "gagal"); reload(); };

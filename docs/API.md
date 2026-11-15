@@ -333,6 +333,64 @@ satu upsert (kolom `ping` berbeda per baris), baris yang mati lewat satu `PATCH 
 per 200 id. Jadi menguji 500 baris ≈ 3-4 request, bukan 500. Kedua jalur itu operasi **tulis**,
 jadi memakai `supabase_service_key` bila terisi (barisnya ditarik dengan anon key).
 
+### Notifikasi Telegram
+
+Scanner mengirim notifikasi langsung ke HTTP API Telegram (`POST
+https://api.telegram.org/bot<token>/sendMessage`, `net/http` biasa — tanpa dependensi baru).
+Notifikasi **aktif hanya kalau `telegram_bot_token` DAN `telegram_chat_id` keduanya terisi**;
+setelannya bisa diisi di **Scheduler → Notifikasi Telegram** atau lewat `POST /api/settings`.
+Token tidak pernah dikembalikan ke klien (balasan hanya memuat `telegram_bot_token_set: true`),
+chat id boleh dibaca.
+
+Hanya dua momen yang dinotifikasi:
+
+1. **Setelah langkah scrape penuh selesai** (run harian maupun catch-up; bukan cek lokal),
+   dikirim setelah langkah push supaya jumlah baris ke pool ikut terlaporkan:
+
+   ```
+   Pan-VlessCloudflare - scrape harian
+   Kandidat ditarik: 1200
+   Hidup: 140
+   Mati: 1060
+   Dikirim ke pool: 97
+   Waktu: selesai dalam 34 menit
+   ```
+
+   Angka diambil dari `counts` langkah `scrape sumber & verifikasi`; `Dikirim ke pool` dari
+   `counts.dikirim` langkah `push ke Supabase`, dan ditulis `-` kalau langkah push dilewati.
+
+2. **Setelah langkah cek lokal 6 jam selesai**:
+
+   ```
+   Pan-VlessCloudflare - cek 6 jam
+   Diperiksa ulang: 300
+   Masih hidup: 88
+   Sudah mati: 212
+   ```
+
+   `Sudah mati` diambil dari `counts.mati` langkah, atau dihitung `diperiksa - hidup` kalau
+   langkah itu tidak melaporkannya.
+
+| Kejadian | Perilaku |
+|---|---|
+| Setelan belum lengkap | tidak ada pesan, tidak ada request (bukan kesalahan) |
+| Kirim gagal (jaringan atau Telegram menolak) | satu baris log + catatan `notifikasi gagal: ...` pada langkah pipeline terkait; **pipeline tetap sukses** |
+| Timeout satu kirim | 15 detik |
+
+`POST /api/notify-test` mengirim pesan uji memakai setelan tersimpan dan meneruskan hasil
+balasan Telegram apa adanya. Rute ini butuh sesi atau token API seperti rute `/api/*` lain.
+
+| Status | Balasan | Arti |
+|---|---|---|
+| `200` | `{ "ok": true, "telegram_status": 200 }` | Telegram menerima pesan |
+| `400` | `{ "ok": false, "error": "...", "missing": ["telegram_chat_id"] }` | token ada tapi chat id belum diisi |
+| `503` | `{ "ok": false, "error": "...", "missing": ["telegram_bot_token", "telegram_chat_id"] }` | setelan Telegram belum diisi sama sekali |
+| `502` | `{ "ok": false, "error": "...", "telegram_status": 400 }` | Telegram menolak (`telegram_status` = balasan Telegram) atau request tidak sampai (`0`) |
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/notify-test -H "X-Api-Token: <token>"
+```
+
 ---
 
 ## Format data
@@ -687,6 +745,8 @@ disimpan ke `settings.json` dan diterapkan ke penjadwal.
 | `push_org_cap` | maksimum baris per `org`/penyedia dalam satu push (0 = tanpa batas) | 0–10000 (negatif → bawaan) |
 | `push_country_cap` | maksimum baris per negara dalam satu push (0 = tanpa batas) | 0–10000 (negatif → bawaan) |
 | `token` | token API untuk klien mesin (kosong = `/api/*` hanya lewat sesi) | string |
+| `telegram_bot_token` | token bot Telegram dari BotFather (hanya ditulis, tidak pernah dikembalikan — balasan hanya memuat `telegram_bot_token_set`) | string |
+| `telegram_chat_id` | tujuan notifikasi (chat/grup id, boleh dikosongkan untuk mematikan) | string |
 
 ```bash
 curl -X POST http://127.0.0.1:8787/api/settings \

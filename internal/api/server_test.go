@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jhopan/Pan-ProxyScanner/internal/auth"
+	"github.com/jhopan/Pan-ProxyScanner/internal/notify"
 	"github.com/jhopan/Pan-ProxyScanner/internal/settings"
 	"github.com/jhopan/Pan-ProxyScanner/internal/store"
 	"github.com/jhopan/Pan-ProxyScanner/internal/supabase"
@@ -1461,5 +1463,342 @@ func TestStateBackupRequiresSessionOrToken(t *testing.T) {
 	}
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("tanpa service key handler harus menjawab 503, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// telegramStub menggantikan api.telegram.org untuk tes notifikasi: request dicatat, balasan
+// diatur tes. Dengan ini tidak pernah ada pesan sungguhan yang dikirim.
+type telegramStub struct {
+	*httptest.Server
+	mu       sync.Mutex
+	requests []telegramRequest
+	status   int
+	body     string
+}
+
+type telegramRequest struct {
+	method      string
+	path        string
+	contentType string
+	form        neturl.Values
+}
+
+func newTelegramStub(t *testing.T) *telegramStub {
+	t.Helper()
+	stub := &telegramStub{status: http.StatusOK, body: `{"ok":true,"result":{"message_id":1}}`}
+	stub.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("body form tidak valid: %v", err)
+		}
+		stub.mu.Lock()
+		stub.requests = append(stub.requests, telegramRequest{
+			method: r.Method, path: r.URL.Path, contentType: r.Header.Get("Content-Type"), form: r.Form,
+		})
+		status, body := stub.status, stub.body
+		stub.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(stub.Close)
+	return stub
+}
+
+func (s *telegramStub) reply(status int, body string) {
+	s.mu.Lock()
+	s.status, s.body = status, body
+	s.mu.Unlock()
+}
+
+func (s *telegramStub) sent() []telegramRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]telegramRequest(nil), s.requests...)
+}
+
+// stubTelegramClient mengarahkan klien notifikasi server ke stub (bukan Telegram sungguhan).
+func stubTelegramClient(stub *telegramStub) func(token, chatID string) *notify.Client {
+	return func(token, chatID string) *notify.Client {
+		return &notify.Client{Token: token, ChatID: chatID, Base: stub.URL, HTTP: stub.Client()}
+	}
+}
+
+// publicSettings tidak boleh membocorkan token bot: klien hanya menerima penanda sudah-diisi.
+func TestPublicSettingsHidesTelegramToken(t *testing.T) {
+	pub := publicSettings(settings.Settings{TelegramBotToken: "123:RAHASIA", TelegramChatID: "-1001"})
+	if _, exists := pub["telegram_bot_token"]; exists {
+		t.Fatal("publicSettings tidak boleh mengirim telegram_bot_token")
+	}
+	if pub["telegram_bot_token_set"] != true {
+		t.Fatalf("telegram_bot_token_set harus true, dapat %v", pub["telegram_bot_token_set"])
+	}
+	if pub["telegram_chat_id"] != "-1001" {
+		t.Fatalf("chat id boleh dibaca klien, dapat %v", pub["telegram_chat_id"])
+	}
+}
+
+// Patch setelan memangkas spasi token/chat id (Normalize) dan mengembalikannya tanpa token.
+func TestSettingsPatchTrimsTelegram(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "tg-set.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := settings.Default()
+	cfgPath := filepath.Join(t.TempDir(), "settings.json")
+	srv := &Server{store: st, settings: &cfg, sessions: auth.New(), cfgPath: cfgPath}
+	srv.sched = scraper.NewScheduler(scraper.NewRunner(st), cfg)
+
+	body := strings.NewReader(`{"telegram_bot_token":"  123:ABC \n","telegram_chat_id":"  -1001 "}`)
+	rec := httptest.NewRecorder()
+	srv.handleSettings(rec, httptest.NewRequest(http.MethodPost, "/api/settings", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("simpan setelan harus 200, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := srv.currentSettings().TelegramBotToken; got != "123:ABC" {
+		t.Fatalf("token harus dipangkas, dapat %q", got)
+	}
+	if got := srv.currentSettings().TelegramChatID; got != "-1001" {
+		t.Fatalf("chat id harus dipangkas, dapat %q", got)
+	}
+	var payload struct {
+		Settings map[string]any `json:"settings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload.Settings["telegram_bot_token"]; exists {
+		t.Fatal("balasan POST /api/settings tidak boleh memuat token bot")
+	}
+	if payload.Settings["telegram_bot_token_set"] != true {
+		t.Fatalf("balasan harus menandai token sudah diisi, dapat %v", payload.Settings["telegram_bot_token_set"])
+	}
+}
+
+// Endpoint uji: tanpa setelan lengkap balasannya jelas (503/400), bukan 500 dan bukan request
+// ke Telegram.
+func TestNotifyTestEndpointNeedsFullSettings(t *testing.T) {
+	cfg := settings.Default()
+	srv := &Server{settings: &cfg, sessions: auth.New()}
+	rec := httptest.NewRecorder()
+	srv.handleNotifyTest(rec, httptest.NewRequest(http.MethodPost, "/api/notify-test", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("tanpa setelan Telegram harus 503, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	var empty struct {
+		OK      bool     `json:"ok"`
+		Error   string   `json:"error"`
+		Missing []string `json:"missing"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &empty); err != nil {
+		t.Fatal(err)
+	}
+	if empty.OK || !strings.Contains(empty.Error, "telegram_bot_token") || !strings.Contains(empty.Error, "telegram_chat_id") {
+		t.Fatalf("pesan 503 harus jelas, dapat %+v", empty)
+	}
+	if len(empty.Missing) != 2 {
+		t.Fatalf("kedua field harus dilaporkan kurang, dapat %v", empty.Missing)
+	}
+
+	// Token ada tetapi chat id kosong: kesalahan setelan (400), bukan 503.
+	cfgTokenOnly := settings.Default()
+	cfgTokenOnly.TelegramBotToken = "123:TOKEN"
+	srvTokenOnly := &Server{settings: &cfgTokenOnly, sessions: auth.New()}
+	rec = httptest.NewRecorder()
+	srvTokenOnly.handleNotifyTest(rec, httptest.NewRequest(http.MethodPost, "/api/notify-test", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("chat id kosong harus 400, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "telegram_chat_id") {
+		t.Fatalf("pesan 400 harus menyebut field yang kurang: %s", rec.Body.String())
+	}
+
+	// Hanya POST.
+	rec = httptest.NewRecorder()
+	srvTokenOnly.handleNotifyTest(rec, httptest.NewRequest(http.MethodGet, "/api/notify-test", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET harus 405, dapat %d", rec.Code)
+	}
+}
+
+// Hasil balasan Telegram diteruskan apa adanya: sukses → ok + telegram_status 200; ditolak →
+// ok false + status balasan Telegram + deskripsinya.
+func TestNotifyTestForwardsTelegramResult(t *testing.T) {
+	stub := newTelegramStub(t)
+	cfg := settings.Default()
+	cfg.TelegramBotToken = "123:TOKEN"
+	cfg.TelegramChatID = "-1001"
+	srv := &Server{settings: &cfg, sessions: auth.New(), notifyClient: stubTelegramClient(stub)}
+
+	rec := httptest.NewRecorder()
+	srv.handleNotifyTest(rec, httptest.NewRequest(http.MethodPost, "/api/notify-test", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("kirim uji sukses harus 200, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	var ok struct {
+		OK     bool `json:"ok"`
+		Status int  `json:"telegram_status"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &ok); err != nil {
+		t.Fatal(err)
+	}
+	if !ok.OK || ok.Status != http.StatusOK {
+		t.Fatalf("balasan sukses salah: %s", rec.Body.String())
+	}
+	sent := stub.sent()
+	if len(sent) != 1 {
+		t.Fatalf("harus satu pesan uji terkirim, dapat %d", len(sent))
+	}
+	if sent[0].path != "/bot123:TOKEN/sendMessage" || sent[0].method != http.MethodPost {
+		t.Fatalf("request uji salah: %+v", sent[0])
+	}
+	if sent[0].form.Get("chat_id") != "-1001" || !strings.Contains(sent[0].form.Get("text"), "uji notifikasi") {
+		t.Fatalf("isi pesan uji salah: %+v", sent[0].form)
+	}
+
+	// Telegram menolak: statusnya diteruskan dan payload menyebut alasannya.
+	stub.reply(http.StatusBadRequest, `{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}`)
+	rec = httptest.NewRecorder()
+	srv.handleNotifyTest(rec, httptest.NewRequest(http.MethodPost, "/api/notify-test", nil))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("penolakan Telegram harus 502, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+	var bad struct {
+		OK             bool   `json:"ok"`
+		Error          string `json:"error"`
+		TelegramStatus int    `json:"telegram_status"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &bad); err != nil {
+		t.Fatal(err)
+	}
+	if bad.OK || bad.TelegramStatus != http.StatusBadRequest || !strings.Contains(bad.Error, "chat not found") {
+		t.Fatalf("balasan penolakan harus meneruskan hasil Telegram, dapat %s", rec.Body.String())
+	}
+}
+
+// Rute uji ikut gate yang sama dengan rute /api/* lain: tanpa sesi/token → 401.
+func TestNotifyTestRequiresSessionOrToken(t *testing.T) {
+	cfg := settings.Default()
+	cfg.Token = "token-uji"
+	srv := &Server{settings: &cfg, sessions: auth.New()}
+	handler := srv.Handler()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/notify-test", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("tanpa sesi/token harus 401, dapat %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/notify-test", nil)
+	req.Header.Set("X-Api-Token", "token-uji")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("token benar harus lolos gate lalu 503 (setelan kosong), dapat %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Kegagalan kirim notifikasi tidak boleh menggagalkan pipeline: langkahnya tetap OK, hanya ada
+// catatan "notifikasi gagal" (tidak ada pipeline.error).
+func TestPipelineNotifyFailureKeepsStepOK(t *testing.T) {
+	stub := newTelegramStub(t)
+	stub.reply(http.StatusInternalServerError, `{"ok":false,"error_code":500,"description":"stub rusak"}`)
+
+	cfg := settings.Default()
+	cfg.TelegramBotToken = "123:TOKEN"
+	cfg.TelegramChatID = "-1001"
+	srv := &Server{settings: &cfg, sessions: auth.New(), notifyClient: stubTelegramClient(stub)}
+	srv.addPipelineStep(PipelineStep{Name: "scrape sumber & verifikasi", OK: true, Note: "140 kandidat diperiksa, 14 hidup"})
+
+	srv.notifyPipeline(context.Background(), cfg, "scrape sumber & verifikasi",
+		notify.DailyMessage(map[string]int{"kandidat": 1200, "hidup": 14, "mati": 1186}, 97, 34*time.Minute))
+
+	srv.pipelineMu.Lock()
+	steps := append([]PipelineStep(nil), srv.pipeline.Steps...)
+	statusErr := srv.pipeline.Error
+	running := srv.pipeline.Running
+	srv.pipelineMu.Unlock()
+	if len(steps) != 1 {
+		t.Fatalf("langkah pipeline tidak boleh bertambah/hilang, dapat %d", len(steps))
+	}
+	if !steps[0].OK || !strings.Contains(steps[0].Note, "notifikasi gagal") {
+		t.Fatalf("langkah harus tetap OK + bercatatan, dapat %+v", steps[0])
+	}
+	if !strings.Contains(steps[0].Note, "140 kandidat diperiksa") {
+		t.Fatalf("catatan asli langkah tidak boleh hilang, dapat %q", steps[0].Note)
+	}
+	if statusErr != "" || running {
+		t.Fatalf("kegagalan notifikasi tidak boleh menjadikan pipeline gagal: err=%q running=%v", statusErr, running)
+	}
+	if len(stub.sent()) != 1 {
+		t.Fatalf("notifikasi tetap dicoba sekali, dapat %d", len(stub.sent()))
+	}
+}
+
+// Tanpa setelan lengkap tidak ada request sama sekali dan tidak ada catatan palsu di langkah.
+func TestPipelineNotifySkippedWithoutSettings(t *testing.T) {
+	stub := newTelegramStub(t)
+	cfg := settings.Default()
+	srv := &Server{settings: &cfg, sessions: auth.New(), notifyClient: stubTelegramClient(stub)}
+	srv.addPipelineStep(PipelineStep{Name: "cek lokal (refresh + target negara)", OK: true, Note: "300 baris diverifikasi ulang"})
+
+	srv.notifyPipeline(context.Background(), cfg, "cek lokal (refresh + target negara)",
+		notify.LocalMessage(map[string]int{"diperiksa": 300, "hidup": 88}))
+
+	if got := stub.sent(); len(got) != 0 {
+		t.Fatalf("tanpa setelan tidak boleh ada request, dapat %d", len(got))
+	}
+	srv.pipelineMu.Lock()
+	note := srv.pipeline.Steps[0].Note
+	srv.pipelineMu.Unlock()
+	if note != "300 baris diverifikasi ulang" {
+		t.Fatalf("catatan langkah tidak boleh berubah, dapat %q", note)
+	}
+}
+
+// Cek lokal (jadwal 6 jam) mengirim pesan "cek 6 jam" tepat satu kali dan tidak menggagalkan
+// pipeline; alamat/path/body-nya sama seperti pengiriman biasa.
+func TestRunPipelineSyncSendsLocalCheckNotification(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "pipe-tg.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	stub := newTelegramStub(t)
+	cfg := settings.Default()
+	cfg.TelegramBotToken = "123:TOKEN"
+	cfg.TelegramChatID = "-1001"
+	srv := &Server{store: st, runner: scraper.NewRunner(st), settings: &cfg, notifyClient: stubTelegramClient(stub)}
+
+	if err := srv.RunPipelineSync(true); err != nil {
+		t.Fatalf("cek lokal tanpa Supabase harus sukses: %v", err)
+	}
+	sent := stub.sent()
+	if len(sent) != 1 {
+		t.Fatalf("cek lokal harus mengirim tepat satu notifikasi, dapat %d", len(sent))
+	}
+	if sent[0].path != "/bot123:TOKEN/sendMessage" {
+		t.Fatalf("path notifikasi salah: %s", sent[0].path)
+	}
+	if got := sent[0].form.Get("text"); !strings.HasPrefix(got, "Pan-VlessCloudflare - cek 6 jam") || !strings.Contains(got, "Diperiksa ulang: ") {
+		t.Fatalf("isi pesan cek 6 jam salah:\n%s", got)
+	}
+
+	srv.pipelineMu.Lock()
+	steps := append([]PipelineStep(nil), srv.pipeline.Steps...)
+	statusErr := srv.pipeline.Error
+	srv.pipelineMu.Unlock()
+	if statusErr != "" {
+		t.Fatalf("notifikasi sukses tidak boleh mengisi error pipeline: %q", statusErr)
+	}
+	for _, step := range steps {
+		if strings.HasPrefix(step.Name, "cek lokal") {
+			if !step.OK {
+				t.Fatalf("langkah cek lokal harus sukses, dapat %+v", step)
+			}
+			if strings.Contains(step.Note, "notifikasi gagal") {
+				t.Fatalf("kirim sukses tidak boleh menulis catatan gagal, dapat %q", step.Note)
+			}
+		}
 	}
 }
