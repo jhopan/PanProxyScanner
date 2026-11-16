@@ -325,6 +325,7 @@ Menu **Supabase** di panel:
 | kematangan | perlu **2× berhasil** (`ok_count ≥ 2`) sebelum naik ke pool; sekali hidup lalu mati tidak cukup |
 | batas org | maksimal `push_org_cap` baris per penyedia (`org`) dalam satu push (bawaan 25; `0` = tanpa batas) |
 | batas negara | maksimal `push_country_cap` baris per negara dalam satu push (bawaan 60; `0` = tanpa batas) |
+| jatah negara target | setiap negara di `country_targets` didahulukan sampai target itu (skor terbaik negaranya), sisa jatah diisi urutan skor; map kosong = perilaku lama |
 | exit IP | satu alamat keluar per **/24** — lima port dari mesin yang sama tidak memenuhi pool |
 | TLS | **hanya menaikkan yang terbukti sanggup TLS 443**; sisanya justru diturunkan |
 

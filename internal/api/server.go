@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	neturl "net/url"
@@ -907,12 +908,26 @@ func hostCheckedAt(unixSec int64) time.Time {
 // since membatasi push ke baris yang dicek setelah waktu itu (push delta). Zero = semua baris
 // segar (dipakai pipeline harian supaya Supabase ikut disegarkan menyeluruh).
 //
+// Alokasi baris yang dinaikkan dua tahap: (a) tiap negara di `country_targets` dengan target
+// > 0 mendapat jatah kandidat terbaiknya lebih dulu, (b) sisanya diisi urutan skor global.
+// Tujuannya supaya negara bertarget tidak kalah oleh negara yang stok kandidatnya jauh lebih
+// banyak. Semua saringan (ok_count ≥ 2, fail_count, verdict edge mati, dedup exit /24) dan
+// batas `push_org_cap`/`push_country_cap` berlaku sama di kedua tahap, dan total baris tidak
+// pernah melebihi `limit`. `country_targets` kosong = perilaku lama persis (tanpa tahap a).
+//
 // `clients.write` (service key bila terisi) yang membawa upsert; `clients.read` tetap anon.
 func (s *Server) pushToSupabase(ctx context.Context, clients supabaseClients, cfg settings.Settings, limit int, edgeDead map[string]bool, since time.Time) (int, int, error) {
 	client := clients.write
 	alive := true
 	fresh := pushFreshMinutes(cfg)
-	promote, err := s.store.List(store.Filter{Alive: &alive, Limit: limit, Order: "score", FreshMinutes: fresh, TLSOnly: cfg.PushRequireTLS, Since: since})
+	// Batas baris yang dinaikkan, dijepit sama seperti store.List supaya dua tahap di bawah
+	// menghitung jatah dengan angka yang benar-benar dipakai query.
+	if limit <= 0 || limit > 5000 {
+		limit = 200
+	}
+	base := store.Filter{Alive: &alive, Order: "score", FreshMinutes: fresh, TLSOnly: cfg.PushRequireTLS, Since: since}
+	base.Limit = limit
+	promote, err := s.store.List(base)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -944,31 +959,42 @@ func (s *Server) pushToSupabase(ctx context.Context, clients supabaseClients, cf
 	countryCount := make(map[string]int, len(promote))
 	skippedYoung, skippedDup, skippedEdge, skippedCap := 0, 0, 0, 0
 	promoted := 0
-	for _, p := range promote {
+	// seenRow menandai baris yang sudah pernah diperiksa (tahap target maupun tahap sisa),
+	// supaya baris pilihan tahap target tidak dihitung dua kali saat tahap sisa memindai
+	// daftar skor global — termasuk penghitung "ditahan", jadi catatan sinkron tetap sama.
+	seenRow := make(map[string]bool, len(promote))
+	// take menerapkan seluruh saringan lama ke satu kandidat lalu menambahkannya ke payload
+	// bila lolos. `false` = tidak dipakai (alasannya sudah masuk penghitung bila relevan).
+	take := func(p store.Proxy) bool {
+		key := p.IP + ":" + strconv.Itoa(p.Port)
+		if seenRow[key] {
+			return false
+		}
+		seenRow[key] = true
 		// lewati proxy yang lebih sering gagal daripada berhasil
 		if p.FailCount > p.OKCount {
-			continue
+			return false
 		}
 		if p.OKCount < minOK {
 			skippedYoung++
-			continue
+			return false
 		}
 		// Verdict edge lebih kuat: proxy yang di edge terbukti mati tidak boleh naik lagi.
-		if edgeDead[p.IP+":"+strconv.Itoa(p.Port)] {
+		if edgeDead[key] {
 			skippedEdge++
-			continue
+			return false
 		}
 		exit := exitKey(p.ExitIP)
 		if exit != "" && seenExit[exit] {
 			skippedDup++
-			continue
+			return false
 		}
 		org := strings.TrimSpace(p.Org)
 		country := strings.ToUpper(strings.TrimSpace(p.Country))
 		if (org != "" && cfg.PushOrgCap > 0 && orgCount[org] >= cfg.PushOrgCap) ||
 			(country != "" && cfg.PushCountryCap > 0 && countryCount[country] >= cfg.PushCountryCap) {
 			skippedCap++
-			continue
+			return false
 		}
 		if exit != "" {
 			seenExit[exit] = true
@@ -985,6 +1011,88 @@ func (s *Server) pushToSupabase(ctx context.Context, clients supabaseClients, cf
 			IsActive: true, LastChecked: now, Ping: p.PingMS,
 		}.EvidenceRow(p.TLS, p.AltOK, p.ExitIP).
 			HostEvidence(p.Alive, p.PingMS, hostCheckedAt(p.LastChecked)))
+		return true
+	}
+	// Tahap (a): jatah per negara target. Negara di `country_targets` mendapat tempat lebih
+	// dulu, jadi negara yang stoknya tipis (mis. ID) tidak kalah oleh negara yang kandidatnya
+	// jauh lebih banyak (mis. US). Tiap negara tetap melewati semua saringan di atas; kalau
+	// kandidatnya habis, sisa jatahnya diisi tahap (b) — tidak meminjam jatah negara lain.
+	//
+	// Negara diproses dari kandidat terbaiknya (skor tertinggi) lebih dulu, bukan urutan
+	// abjad: kalau dua negara bersaing untuk sisa slot sebuah org/negara, pemenangnya tetap
+	// baris berskor lebih tinggi seperti sebelum ada jatah ini. Jatah tiap negara tidak
+	// diambil negara lain karena tahap ini berjalan sebelum tahap (b) dan baris yang sudah
+	// terpilih ditandai di `seenRow`.
+	preferred := 0
+	if len(cfg.CountryTargets) > 0 {
+		type targetCountry struct {
+			code   string
+			target int
+			pool   []store.Proxy
+			best   float64
+		}
+		list := make([]targetCountry, 0, len(cfg.CountryTargets))
+		for code, target := range cfg.CountryTargets {
+			code = strings.ToUpper(strings.TrimSpace(code))
+			if len(code) != 2 || target <= 0 {
+				continue
+			}
+			// Ambil kandidat lebih banyak dari jatah: sebagian akan tertahan saringan
+			// (ok_count, exit IP sama, cap org/negara) dan digantikan kandidat berikutnya.
+			fetch := target * 4
+			if fetch < 8 {
+				fetch = 8
+			}
+			if fetch > 500 {
+				fetch = 500
+			}
+			pool := base
+			pool.Country = code
+			pool.Limit = fetch
+			rowsForCountry, listErr := s.store.List(pool)
+			if listErr != nil {
+				return 0, 0, listErr
+			}
+			tc := targetCountry{code: code, target: target, pool: rowsForCountry}
+			if len(rowsForCountry) > 0 {
+				tc.best = rowsForCountry[0].Score()
+			} else {
+				tc.best = math.Inf(-1) // tanpa kandidat: diproses paling akhir (dan tidak memakai slot)
+			}
+			list = append(list, tc)
+		}
+		sort.SliceStable(list, func(i, j int) bool {
+			if list[i].best != list[j].best {
+				return list[i].best > list[j].best
+			}
+			return list[i].code < list[j].code
+		})
+		for _, tc := range list {
+			want := tc.target
+			if room := limit - promoted; want > room {
+				want = room
+			}
+			if want <= 0 || len(tc.pool) == 0 {
+				continue
+			}
+			taken := 0
+			for _, p := range tc.pool {
+				if taken >= want {
+					break
+				}
+				if take(p) {
+					taken++
+				}
+			}
+			preferred += taken
+		}
+	}
+	// Tahap (b): sisa jatah diisi urutan skor seperti sebelumnya.
+	for _, p := range promote {
+		if promoted >= limit {
+			break
+		}
+		take(p)
 	}
 	demoted := 0
 	if cfg.PushRequireTLS {
@@ -1032,6 +1140,9 @@ func (s *Server) pushToSupabase(ctx context.Context, clients supabaseClients, cf
 	}
 	if skippedCap > 0 {
 		note += fmt.Sprintf(", %d ditahan (batas org/negara)", skippedCap)
+	}
+	if preferred > 0 {
+		note += fmt.Sprintf(", %d diutamakan (target negara)", preferred)
 	}
 	if skippedEdge > 0 {
 		note += fmt.Sprintf(", %d ditahan (edge bilang mati)", skippedEdge)

@@ -231,6 +231,17 @@ Dua hal yang ikut menentukan kualitas push:
     Baris tanpa `org` (penyedianya belum diketahui — scanner hanya membaca `org` dari tabel
     Supabase, tidak menebaknya) tidak dihitung sebagai satu org yang sama, jadi tidak ditahan
     hanya karena cap; hal yang sama berlaku untuk baris tanpa negara.
+- **Jatah negara target** (`country_targets`, dua tahap): push menyusun daftar promote dalam
+  dua tahap. Tahap pertama memberi setiap negara di `country_targets` (target > 0) jatah
+  kandidat **terbaik menurut skor** sebanyak targetnya, supaya negara yang stok kandidatnya
+  tipis (mis. `ID`) tidak kalah oleh negara yang kandidatnya jauh lebih banyak (mis. `US`).
+  Tahap kedua mengisi sisa `limit` dengan urutan skor seperti biasa, melewati baris yang sudah
+  terpilih. Kedua tahap memakai saringan & cap yang sama di atas (`ok_count ≥ 2`,
+  `fail_count`, verdict edge mati, dedup exit /24, `push_org_cap`, `push_country_cap`), total
+  baris tidak pernah melebihi `limit`, dan negara target tanpa kandidat hanya dilewati —
+  jatahnya diisi tahap kedua, bukan dipinjam dari negara lain. Sumbangan tahap pertama dicatat
+  sebagai `N diutamakan (target negara)` di status sinkron. `country_targets` kosong = perilaku
+  lama persis (satu tahap urut skor), jadi setelan ini tidak wajib diisi.
 - **Uji TLS 443 & port lain**: setiap proxy hidup diuji `GET https://cp.cloudflare.com/cdn-cgi/trace`
   di dalam tunnel TLS dengan **verifikasi sertifikat**, lalu (kalau `probe_alt` aktif) trace
   yang sama lewat port 8443/2053. Bukti yang diterima bukan cuma status HTTP: harus ada header
@@ -273,6 +284,7 @@ Supaya berjalan sendiri tanpa perintah manual, aktifkan di **Scheduler → Supab
 | `supabase_pull_limit` | jumlah baris Supabase yang ditarik & diverifikasi tiap siklus (`0` = tidak) |
 | `push_org_cap` | maksimum baris **per `org`/penyedia** dalam satu push (bawaan `25`; `0` = tanpa batas; nilai negatif ditolak → kembali ke bawaan). Baris tanpa `org` tidak dihitung |
 | `push_country_cap` | maksimum baris **per negara** dalam satu push (bawaan `60`; `0` = tanpa batas; nilai negatif ditolak → kembali ke bawaan). Baris tanpa negara tidak dihitung |
+| `country_targets` | target minimal proxy sanggup TLS per negara, mis. `{"ID":5,"SG":3,"MY":3,"JP":3,"HK":3,"KR":3}` (kode 2 huruf, target dijepit 0–200, bawaan `ID/SG/MY/JP/HK/KR`). Dipakai untuk **urutan verifikasi** (`country_top_up`) **dan** untuk **alokasi push**: negara bertarget mendapat jatah kandidatnya lebih dulu, sisanya diisi urut skor (lihat "Jatah negara target" di atas). Map kosong = tanpa jatah, perilaku push lama |
 | `push delta` | tidak ada setelan terpisah: waktu push terakhir disimpan di tabel `meta` (`last_push_at`), dan push dari jadwal 6 jam / auto-push hanya mengirim baris yang `last_checked`-nya lebih baru. Kalau tidak ada yang berubah, status sinkron menulis `push delta: tidak ada perubahan` (bukan kegagalan) |
 | `probe_tls` | uji tunnel 443 dengan TLS terverifikasi (root CA sistem) untuk setiap proxy hidup |
 | `probe_alt` | uji tambahan port non-standar 8443/2053 (`alt_ok`) |
@@ -770,6 +782,7 @@ disimpan ke `settings.json` dan diterapkan ke penjadwal.
 | `supabase_pull_limit` | baris Supabase yang diverifikasi ulang tiap siklus | 0–20000 |
 | `push_org_cap` | maksimum baris per `org`/penyedia dalam satu push (0 = tanpa batas) | 0–10000 (negatif → bawaan) |
 | `push_country_cap` | maksimum baris per negara dalam satu push (0 = tanpa batas) | 0–10000 (negatif → bawaan) |
+| `country_targets` | target per negara untuk urutan verifikasi **dan** jatah push (map kode 2 huruf → target; kosong = tanpa jatah) | target 0–200, kode bukan 2 huruf dibuang |
 | `token` | token API untuk klien mesin (kosong = `/api/*` hanya lewat sesi) | string |
 | `telegram_bot_token` | token bot Telegram dari BotFather (hanya ditulis, tidak pernah dikembalikan — balasan hanya memuat `telegram_bot_token_set`) | string |
 | `telegram_chat_id` | tujuan notifikasi (chat/grup id, boleh dikosongkan untuk mematikan) | string |

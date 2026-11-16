@@ -862,6 +862,13 @@ func capTestStore(t *testing.T, rows []pushRow) *store.Store {
 // terkirim plus catatan sinkron yang tercatat.
 func capPush(t *testing.T, st *store.Store, cfg settings.Settings) ([]map[string]any, string) {
 	t.Helper()
+	return capPushLimit(t, st, cfg, 100)
+}
+
+// capPushLimit sama seperti capPush, tetapi dengan jatah baris (`limit`) yang bisa diatur:
+// dipakai tes jatah negara yang perlu limit lebih kecil dari jumlah kandidat.
+func capPushLimit(t *testing.T, st *store.Store, cfg settings.Settings, limit int) ([]map[string]any, string) {
+	t.Helper()
 	var mu sync.Mutex
 	var got []map[string]any
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -880,7 +887,7 @@ func capPush(t *testing.T, st *store.Store, cfg settings.Settings) ([]map[string
 
 	client := supabase.New(ts.URL, "kunci-uji", "proxy_pool")
 	srv := &Server{store: st}
-	if _, _, err := srv.pushToSupabase(context.Background(), testClients(client), cfg, 100, nil, time.Now().Add(-24*time.Hour)); err != nil {
+	if _, _, err := srv.pushToSupabase(context.Background(), testClients(client), cfg, limit, nil, time.Now().Add(-24*time.Hour)); err != nil {
 		t.Fatalf("push ke stub harus sukses: %v", err)
 	}
 	srv.stateMu.Lock()
@@ -1044,6 +1051,219 @@ func TestPushCapsKeepDedupAndOKCountRules(t *testing.T) {
 	}
 	if !strings.Contains(note, "1 dilewati (exit IP sama)") {
 		t.Fatalf("dedup exit IP per /24 harus tetap berlaku, dapat %q", note)
+	}
+}
+
+// country_targets pada push (tahap a): negara bertarget mendapat jatah kandidat terbaiknya
+// lebih dulu, walau skornya jauh di bawah negara lain yang kandidatnya jauh lebih banyak.
+// Tanpa jatah ini 30 baris US (skor tinggi) akan menghabiskan seluruh limit.
+func TestPushCountryTargetQuotaKeepsLowScoreCountry(t *testing.T) {
+	rows := make([]pushRow, 0, 33)
+	for i := range 30 {
+		rows = append(rows, pushRow{ip: fmt.Sprintf("5.5.%d.1", i+1), country: "US", ping: 100 + i})
+	}
+	rows = append(rows,
+		pushRow{ip: "9.9.1.1", country: "ID", ping: 4000},
+		pushRow{ip: "9.9.1.2", country: "ID", ping: 4100},
+		pushRow{ip: "9.9.1.3", country: "ID", ping: 4200},
+	)
+	st := capTestStore(t, rows)
+	cfg := settings.Default()
+	cfg.PushOrgCap = 0
+	cfg.PushCountryCap = 0
+	cfg.CountryTargets = map[string]int{"ID": 2}
+
+	got, note := capPushLimit(t, st, cfg, 5)
+	if n := rowsWith(got, "country", "ID"); n != 2 {
+		t.Fatalf("negara target ID harus dapat 2 baris walau skornya terendah, dapat %d (%v)", n, ips(got))
+	}
+	if len(got) != 5 {
+		t.Fatalf("sisa jatah harus diisi tahap skor sampai limit 5, dapat %d (%v)", len(got), ips(got))
+	}
+	if !strings.Contains(note, "2 diutamakan (target negara)") {
+		t.Fatalf("catatan sinkron harus menyebut baris yang diutamakan target negara, dapat %q", note)
+	}
+}
+
+// Negara bertarget tanpa kandidat bukan error: jatahnya diisi tahap sisa (urut skor), bukan
+// dipinjam dari negara lain sebagai "jatah negara itu".
+func TestPushCountryTargetWithoutCandidatesFallsBack(t *testing.T) {
+	st := capTestStore(t, []pushRow{
+		{ip: "1.1.1.1", country: "US", ping: 100},
+		{ip: "2.2.2.2", country: "US", ping: 200},
+		{ip: "3.3.3.3", country: "JP", ping: 300},
+	})
+	cfg := settings.Default()
+	cfg.PushOrgCap = 0
+	cfg.PushCountryCap = 0
+	cfg.CountryTargets = map[string]int{"MY": 3}
+
+	got, note := capPushLimit(t, st, cfg, 3)
+	if len(got) != 3 {
+		t.Fatalf("tanpa kandidat MY, seluruh limit tetap terisi tahap sisa, dapat %d (%v)", len(got), ips(got))
+	}
+	if n := rowsWith(got, "country", "MY"); n != 0 {
+		t.Fatalf("tidak ada baris MY di database, dapat %d", n)
+	}
+	if strings.Contains(note, "diutamakan (target negara)") {
+		t.Fatalf("tahap target tidak menyumbang baris, catatan tidak boleh menyebutnya: %q", note)
+	}
+}
+
+// Jatah negara tidak melemahkan saringan lama: cap org, cap negara, dedup exit /24, dan syarat
+// ok_count ≥ 2 tetap dihitung di tahap target.
+func TestPushCountryTargetQuotaKeepsExistingFilters(t *testing.T) {
+	t.Run("cap org, exit /24, ok_count", func(t *testing.T) {
+		st := capTestStore(t, []pushRow{
+			{ip: "1.1.1.1", country: "ID", org: "Hetzner", ping: 100, exit: "198.51.100.7"},
+			{ip: "2.2.2.2", country: "ID", org: "Hetzner", ping: 200},                    // org sama, cap 1
+			{ip: "3.3.3.3", country: "ID", org: "OVH", ping: 300, exit: "198.51.100.99"}, // /24 sama
+			{ip: "4.4.4.4", country: "ID", org: "Vultr", ping: 400, ok: 1},               // baru 1× berhasil
+		})
+		cfg := settings.Default()
+		cfg.PushOrgCap = 1
+		cfg.PushCountryCap = 0
+		cfg.CountryTargets = map[string]int{"ID": 2}
+
+		got, note := capPushLimit(t, st, cfg, 10)
+		if len(got) != 1 || ips(got)[0] != "1.1.1.1" {
+			t.Fatalf("hanya baris berskor tertinggi yang boleh lolos semua saringan, dapat %v", ips(got))
+		}
+		for _, want := range []string{
+			"1 ditahan (batas org/negara)",
+			"1 dilewati (exit IP sama)",
+			"1 ditahan (baru 1× berhasil)",
+			"1 diutamakan (target negara)",
+		} {
+			if !strings.Contains(note, want) {
+				t.Fatalf("catatan sinkron harus memuat %q, dapat %q", want, note)
+			}
+		}
+	})
+
+	t.Run("cap negara", func(t *testing.T) {
+		st := capTestStore(t, []pushRow{
+			{ip: "1.1.1.1", country: "ID", org: "Hetzner", ping: 100},
+			{ip: "2.2.2.2", country: "ID", org: "OVH", ping: 200},
+			{ip: "3.3.3.3", country: "SG", org: "Vultr", ping: 300},
+		})
+		cfg := settings.Default()
+		cfg.PushOrgCap = 0
+		cfg.PushCountryCap = 1
+		cfg.CountryTargets = map[string]int{"ID": 2}
+
+		got, note := capPushLimit(t, st, cfg, 10)
+		if n := rowsWith(got, "country", "ID"); n != 1 {
+			t.Fatalf("cap negara ID=1 harus berlaku juga di tahap target, dapat %d", n)
+		}
+		if len(got) != 2 || rowsWith(got, "country", "SG") != 1 {
+			t.Fatalf("negara lain tetap diisi tahap sisa, dapat %v", ips(got))
+		}
+		if !strings.Contains(note, "1 ditahan (batas org/negara)") {
+			t.Fatalf("baris yang ditahan cap negara harus tercatat, dapat %q", note)
+		}
+	})
+}
+
+// Total baris tidak pernah melebihi limit, termasuk saat jumlah target melebihi limit.
+func TestPushCountryTargetQuotaRespectsLimit(t *testing.T) {
+	st := capTestStore(t, []pushRow{
+		{ip: "1.1.1.1", country: "ID", org: "Hetzner", ping: 100},
+		{ip: "2.2.2.2", country: "ID", org: "OVH", ping: 200},
+		{ip: "3.3.3.3", country: "SG", org: "Vultr", ping: 300},
+		{ip: "4.4.4.4", country: "SG", org: "DigitalOcean", ping: 400},
+		{ip: "5.5.5.5", country: "JP", org: "Linode", ping: 500},
+		{ip: "6.6.6.6", country: "JP", org: "Vultr", ping: 600},
+	})
+	cfg := settings.Default()
+	cfg.PushOrgCap = 0
+	cfg.PushCountryCap = 0
+	cfg.CountryTargets = map[string]int{"ID": 2, "SG": 2, "JP": 2}
+
+	got, _ := capPushLimit(t, st, cfg, 3)
+	if len(got) != 3 {
+		t.Fatalf("total baris harus tepat limit (3), dapat %d (%v)", len(got), ips(got))
+	}
+}
+
+// legacyPromoteIPs meniru pemilihan push SEBELUM ada jatah negara: satu lintasan pada daftar
+// urut skor dengan saringan ok_count/fail, dedup exit /24, dan cap org/negara. Dipakai sebagai
+// pembanding: `country_targets` kosong harus menghasilkan daftar yang sama persis.
+func legacyPromoteIPs(cands []store.Proxy, cfg settings.Settings, limit int) []string {
+	var out []string
+	seenExit := make(map[string]bool)
+	orgCount := make(map[string]int)
+	countryCount := make(map[string]int)
+	for _, p := range cands {
+		if len(out) >= limit {
+			break
+		}
+		if p.FailCount > p.OKCount {
+			continue
+		}
+		if p.OKCount < 2 {
+			continue
+		}
+		exit := exitKey(p.ExitIP)
+		if exit != "" && seenExit[exit] {
+			continue
+		}
+		org := strings.TrimSpace(p.Org)
+		country := strings.ToUpper(strings.TrimSpace(p.Country))
+		if (org != "" && cfg.PushOrgCap > 0 && orgCount[org] >= cfg.PushOrgCap) ||
+			(country != "" && cfg.PushCountryCap > 0 && countryCount[country] >= cfg.PushCountryCap) {
+			continue
+		}
+		if exit != "" {
+			seenExit[exit] = true
+		}
+		if org != "" {
+			orgCount[org]++
+		}
+		if country != "" {
+			countryCount[country]++
+		}
+		out = append(out, p.IP)
+	}
+	return out
+}
+
+// country_targets kosong = perilaku lama persis: tidak ada tahap target, urutan skor global,
+// dan catatan sinkron tidak menyebut "diutamakan".
+func TestPushCountryTargetsEmptyMatchesLegacySelection(t *testing.T) {
+	st := capTestStore(t, []pushRow{
+		{ip: "1.1.1.1", country: "ID", org: "Hetzner", ping: 100},
+		{ip: "2.2.2.2", country: "ID", org: "Hetzner", ping: 200},
+		{ip: "3.3.3.3", country: "US", org: "OVH", ping: 300},
+		{ip: "4.4.4.4", country: "SG", org: "Vultr", ping: 400, exit: "198.51.100.7"},
+		{ip: "5.5.5.5", country: "SG", org: "DigitalOcean", ping: 500, exit: "198.51.100.99"}, // /24 sama
+		{ip: "6.6.6.6", country: "JP", org: "Hetzner", ping: 600, ok: 1},                      // baru 1× berhasil
+	})
+	cfg := settings.Default()
+	cfg.PushOrgCap = 2
+	cfg.PushCountryCap = 2
+	cfg.CountryTargets = map[string]int{}
+	const limit = 5
+
+	alive := true
+	cands, err := st.List(store.Filter{Alive: &alive, Limit: limit, Order: "score", FreshMinutes: pushFreshMinutes(cfg)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := legacyPromoteIPs(cands, cfg, limit)
+
+	got, note := capPushLimit(t, st, cfg, limit)
+	gotIPs := ips(got)
+	if len(gotIPs) != len(want) {
+		t.Fatalf("daftar hasil harus sama panjang dengan pemilihan lama: %v vs %v", gotIPs, want)
+	}
+	for i := range want {
+		if gotIPs[i] != want[i] {
+			t.Fatalf("daftar hasil harus identik dengan pemilihan lama: %v vs %v", gotIPs, want)
+		}
+	}
+	if strings.Contains(note, "diutamakan") {
+		t.Fatalf("tanpa country_targets tidak boleh ada catatan jatah negara: %q", note)
 	}
 }
 
