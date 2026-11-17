@@ -58,6 +58,9 @@ var All = []Source{
 	{Name: "vakhov-https", Kind: "txt", URL: "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt"},
 	{Name: "kangproxy-socks5", Kind: "txt", URL: "https://raw.githubusercontent.com/officialputuid/KangProxy/main/socks5/socks5.txt"},
 	{Name: "kangproxy-http", Kind: "txt", URL: "https://raw.githubusercontent.com/officialputuid/KangProxy/main/http/http.txt"},
+	// VPSLab: file mentah di akar repo (diperbarui harian).
+	{Name: "vpslab-socks5", Kind: "txt", URL: "https://raw.githubusercontent.com/VPSLabCloud/VPSLab-Free-Proxy-List/main/socks5_all.txt"},
+	{Name: "vpslab-http", Kind: "txt", URL: "https://raw.githubusercontent.com/VPSLabCloud/VPSLab-Free-Proxy-List/main/http_all.txt"},
 	{Name: "prxchk-socks5", Kind: "txt", URL: "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt"},
 	{Name: "prxchk-http", Kind: "txt", URL: "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt"},
 	{Name: "mmpx12-socks5", Kind: "txt", URL: "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt"},
@@ -86,6 +89,9 @@ var All = []Source{
 	{Name: "geonode-jp", Kind: "api", URL: "https://proxylist.geonode.com/api/proxy-list?limit=200&page=1&sort_by=lastChecked&sort_type=desc&country=JP"},
 	{Name: "geonode-hk", Kind: "api", URL: "https://proxylist.geonode.com/api/proxy-list?limit=200&page=1&sort_by=lastChecked&sort_type=desc&country=HK"},
 	{Name: "geonode-kr", Kind: "api", URL: "https://proxylist.geonode.com/api/proxy-list?limit=200&page=1&sort_by=lastChecked&sort_type=desc&country=KR"},
+	// proxifly per negara: JSON yang sama dengan sumber utama, sudah berlabel negara.
+	{Name: "proxifly-id", Kind: "json", URL: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/ID/data.json"},
+	{Name: "proxifly-sg", Kind: "json", URL: "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/SG/data.json"},
 
 	{Name: "spys-me-socks", Kind: "txt", URL: "https://spys.me/socks.txt"},
 	{Name: "proxyspace-socks5", Kind: "txt", URL: "https://proxyspace.pro/socks5.txt"},
