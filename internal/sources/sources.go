@@ -61,6 +61,21 @@ var All = []Source{
 	// VPSLab: file mentah di akar repo (diperbarui harian).
 	{Name: "vpslab-socks5", Kind: "txt", URL: "https://raw.githubusercontent.com/VPSLabCloud/VPSLab-Free-Proxy-List/main/socks5_all.txt"},
 	{Name: "vpslab-http", Kind: "txt", URL: "https://raw.githubusercontent.com/VPSLabCloud/VPSLab-Free-Proxy-List/main/http_all.txt"},
+	// --- tambahan besar (dipilih setelah diuji satu per satu) ---
+	{Name: "proxy4parsing-http", Kind: "txt", URL: "https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt"},
+	{Name: "openproxylist-http", Kind: "txt", URL: "https://api.openproxylist.xyz/http.txt"},
+	{Name: "openproxylist-socks5", Kind: "txt", URL: "https://api.openproxylist.xyz/socks5.txt"},
+	{Name: "b4rc0de-http", Kind: "txt", URL: "https://raw.githubusercontent.com/B4RC0DE-TM/proxy-list/main/HTTP.txt"},
+	{Name: "b4rc0de-socks5", Kind: "txt", URL: "https://raw.githubusercontent.com/B4RC0DE-TM/proxy-list/main/SOCKS5.txt"},
+	{Name: "iplocate-http", Kind: "txt", URL: "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt"},
+	{Name: "iplocate-socks5", Kind: "txt", URL: "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/socks5.txt"},
+	{Name: "rdavydov-http", Kind: "txt", URL: "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt"},
+	{Name: "rdavydov-socks5", Kind: "txt", URL: "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/socks5.txt"},
+	{Name: "zloi-socks4", Kind: "txt", URL: "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks4.txt"},
+	{Name: "lionkings-cn", Kind: "txt", URL: "https://raw.githubusercontent.com/saisuiu/Lionkings-Http-Proxys-Proxies/main/cnfree.txt"},
+	{Name: "proxyscrape-v2-http", Kind: "api", URL: "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all"},
+	{Name: "myproxy-html", Kind: "html", URL: "https://www.my-proxy.com/free-proxy-list.html"},
+
 	{Name: "prxchk-socks5", Kind: "txt", URL: "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt"},
 	{Name: "prxchk-http", Kind: "txt", URL: "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt"},
 	{Name: "mmpx12-socks5", Kind: "txt", URL: "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt"},
